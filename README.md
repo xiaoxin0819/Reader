@@ -5,7 +5,7 @@
 
 ## 下载（普通用户）
 
-**[⬇ 下载 Reader-portable.zip](https://github.com/xiaoxin0819/Reader/releases/latest/download/Reader-portable.zip)**（34 MB）
+**[⬇ 下载 Reader.zip](https://github.com/xiaoxin0819/Reader/releases/latest/download/Reader.zip)**（34 MB）
 
 解压后双击 `Reader.exe` 即可，**无需安装 Node.js**。
 
@@ -19,7 +19,7 @@
 
 ### 方式一：单文件 exe
 
-`dist/Reader-portable.zip` 解压后双击 **`Reader.exe`** 即可，无需安装 Node.js。
+`dist/Reader.zip` 解压后双击 **`Reader.exe`** 即可，无需安装 Node.js。
 
 - 首次运行会在 exe 同级目录自动生成 `reader.config.json`、`sources/`、`cache/`、`fonts/`，
   并把内置的 31 个书源释放到 `sources/groups/group-1/`。
@@ -27,12 +27,31 @@
 - 数据全在同级目录，整个文件夹拷走就带走了全部数据（含书源、书架、缓存、登录态）。
 - **不要放在 `C:\Program Files` 等需要管理员权限的目录**，否则无法写入数据。
 
+#### 换端口
+
+默认监听 `7788`，三种方式任选其一：
+
+| 方式 | 做法 |
+| --- | --- |
+| 配置文件（推荐） | 在 exe 同级新建 `port.txt`，内容写一个数字，如 `8080` |
+| 命令行 | `Reader.exe --port 8080` |
+| 环境变量 | `set PORT=8080` 然后运行 `Reader.exe` |
+
+优先级：命令行 > 环境变量 > `port.txt` > 默认 7788。
+
+其它行为：
+
+- 端口被占用时**自动往后找空闲端口**，启动日志会打印实际地址
+- 没显式指定端口时重复双击，不会起第二个实例，而是打开已有实例的页面
+- 写 `0` 表示让系统随机分配一个空闲端口
+- 想同时开多个 Reader（不同书库）：把文件夹复制一份，各改各的 `port.txt`
+
 自行打包：
 
 ```bash
 cd Reader
 npm install --no-save esbuild     # 打包脚本依赖 esbuild
-node build/build-exe.mjs          # 产出 dist/Reader.exe、dist/Reader-portable.zip
+node build/build-exe.mjs          # 产出 dist/Reader.exe、dist/Reader.zip
 ```
 
 发布新版本（把压缩包发到 GitHub Release，不走 git 提交二进制）：

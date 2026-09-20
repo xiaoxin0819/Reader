@@ -86,7 +86,53 @@ const BUILTIN_TXT_TOC_PATH = path.join(SOURCE_DIR, "builtin-txt-toc-rules.json")
 const SOURCE_GROUPS_DIR = path.join(SOURCE_DIR, "groups");
 const SOURCE_GROUPS_INDEX = path.join(SOURCE_GROUPS_DIR, "index.json");
 const SOURCE_GROUP_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
-const PORT = Number(process.env.PORT || 7788);
+/**
+ * 端口解析。优先级（从高到低）：
+ *   1. 命令行参数  --port 8080 / -p 8080
+ *   2. 环境变量    PORT=8080
+ *   3. 配置文件    exe 同级的 port.txt（内容就是一个数字）
+ *   4. 默认        7788
+ *
+ * 为什么需要配置文件：exe 是双击运行的，用户没法方便地设环境变量；
+ * 放一个 port.txt 是最直观的做法（记事本改个数字就行）。
+ *
+ * 支持 0：表示「让系统自动分配空闲端口」，启动日志会打印实际端口。
+ */
+function resolvePort() {
+  const fromArgs = (() => {
+    const argv = process.argv.slice(1);
+    for (let i = 0; i < argv.length; i++) {
+      const a = String(argv[i]);
+      const m = /^--?port[=:]?(\d+)$/i.exec(a) || /^-p(\d+)$/i.exec(a);
+      if (m) return m[1];
+      if (/^--?port$/i.test(a) || /^-p$/i.test(a)) return argv[i + 1];
+    }
+    return null;
+  })();
+
+  const fromFile = (() => {
+    try {
+      const p = path.join(__dirname, "port.txt");
+      if (!fs.existsSync(p)) return null;
+      const txt = fs.readFileSync(p, "utf8").trim();
+      const m = /^(\d{1,5})/.exec(txt);
+      return m ? m[1] : null;
+    } catch { return null; }
+  })();
+
+  const raw = fromArgs || process.env.PORT || fromFile || "7788";
+  const n = Number(raw);
+  // 0 合法（系统分配）；1~65535 合法；其余回退默认值
+  if (!Number.isInteger(n) || n < 0 || n > 65535) return 7788;
+  return n;
+}
+const PORT = resolvePort();
+// 记录用户是否显式指定过端口 —— 决定「端口被占用」时是报错还是自动换一个
+const PORT_EXPLICIT = !!(process.argv.slice(1).some((a) => /^--?port|^-p/i.test(String(a)))
+  || process.env.PORT
+  || (() => { try { return fs.existsSync(path.join(__dirname, "port.txt")); } catch { return false; } })());
+// 实际监听端口。PORT 为 0 时由系统分配，listen 回调里回填真实值。
+let activePort = PORT;
 // legado BookType.localTag：本地书的 origin，用于替换净化的 scope / excludeScope 匹配
 const LOCAL_ORIGIN = "loc_book";
 
@@ -2106,7 +2152,8 @@ async function warmOnlineContent(book, index) {
     index: String(index),
     timeout: "30000",
   });
-  const r = await fetch(`http://127.0.0.1:${PORT}/api/online/content?${qs}`, {
+  // 用 activePort 而不是 PORT：PORT 可能是 0（系统分配），真实端口在 listen 后才知道
+  const r = await fetch(`http://127.0.0.1:${activePort}/api/online/content?${qs}`, {
     signal: AbortSignal.timeout(35000),
   });
   const j = await r.json().catch(() => null);
@@ -4768,7 +4815,7 @@ async function fetchTocForBook(origin, bookUrl, timeout) {
     /** 优雅关闭：Windows taskkill /f 不走 SIGTERM，.bat 改为先调这个接口再兜底强杀 */
     if (p === "/api/shutdown" && req.method === "POST") {
       const origin = req.headers.origin || "";
-      if (origin && origin !== `http://127.0.0.1:${PORT}` && origin !== `http://localhost:${PORT}`) {
+      if (origin && origin !== `http://127.0.0.1:${activePort}` && origin !== `http://localhost:${activePort}`) {
         return send(res, 403, { error: "禁止跨站关闭服务" });
       }
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
@@ -4792,14 +4839,20 @@ server.on("upgrade", (req, socket) => {
 });
 
 server.listen(PORT, "127.0.0.1", () => {
-  console.log(`Reader 已启动: http://127.0.0.1:${PORT}`);
+  // PORT=0 时由系统分配，这里回填真实端口，后续所有 URL 都用它
+  const addr = server.address();
+  activePort = (addr && typeof addr === "object" && addr.port) ? addr.port : PORT;
+  console.log(`Reader 已启动: http://127.0.0.1:${activePort}`);
+  if (activePort !== 7788) {
+    console.log(`（当前端口 ${activePort}；改端口：命令行加 --port 8080，或在 exe 同级放 port.txt 写一个数字）`);
+  }
   console.log(`书源组「${activeSourceGroup()?.name || "默认"}」：${sources.length} 个（启用 ${enabledSources().length}）`);
   /* exe 便携版：双击后自动打开浏览器。
      用户拿到的只有一个 Reader.exe，不打开浏览器的话不知道要访问哪个地址。
      开发模式（npm start / 启动Reader.bat）不自动开，避免每次重启都弹窗；
      需要时用 READER_OPEN_BROWSER=1 强制打开。 */
   if (IS_SEA || process.env.READER_OPEN_BROWSER === "1") {
-    const url = `http://127.0.0.1:${PORT}/`;
+    const url = `http://127.0.0.1:${activePort}/`;
     try {
       // 用系统默认浏览器打开（Windows: start 是 cmd 内置命令，必须走 cmd）
       spawn("cmd", ["/c", "start", "", url], { detached: true, stdio: "ignore", windowsHide: true }).unref();
@@ -4823,12 +4876,23 @@ server.listen(PORT, "127.0.0.1", () => {
    这里改成「说明已在运行 + 直接打开页面 + 退出」，与「阅读器」的行为一致。 */
 server.on("error", (e) => {
   if (e && e.code === "EADDRINUSE") {
-    const url = `http://127.0.0.1:${PORT}/`;
+    const url = `http://127.0.0.1:${activePort}/`;
+    /* 两种情况要分开处理，日志也不能混：
+       · 用户没显式指定端口（重复双击 exe）→ 说明已有一个实例在跑，
+         直接打开它的页面然后退出，不要起第二个实例；
+       · 用户显式指定了端口但被占用 → 自动往后找空闲端口，
+         避免「想换端口却恰好被占用」直接失败。 */
+    if (PORT_EXPLICIT) {
+      if (tryListenNextPort()) return;
+      console.error(`端口 ${activePort} 及其后续端口都被占用，请换一个（--port 9000）`);
+      setTimeout(() => process.exit(1), 1500);
+      return;
+    }
     console.log(`Reader 已在运行: ${url}`);
     if (IS_SEA || process.env.READER_OPEN_BROWSER === "1") {
       try {
         spawn("cmd", ["/c", "start", "", url], { detached: true, stdio: "ignore", windowsHide: true }).unref();
-      } catch { /* 打不开就算了，下面已经打印地址 */ }
+      } catch { /* 打不开就算了，上面已经打印地址 */ }
     }
     // 稍等一下再退出，让用户看清提示（双击场景窗口不会立刻消失）
     setTimeout(() => process.exit(0), IS_SEA ? 1500 : 0);
@@ -4837,6 +4901,35 @@ server.on("error", (e) => {
   console.error("启动失败: " + (e && e.message));
   process.exit(1);
 });
+
+/**
+ * 端口被占用时向后找下一个可用端口（最多试 20 个）。
+ * 只在用户显式指定端口时调用，避免「双击两次却起了两个实例」。
+ */
+let portRetry = 0;
+function tryListenNextPort() {
+  if (portRetry >= 20) {
+    console.error("连续 20 个端口都被占用，请手动指定一个空闲端口（--port 9000）");
+    return false;
+  }
+  portRetry++;
+  const next = activePort + 1;
+  if (next > 65535) return false;
+  console.log(`端口 ${activePort} 被占用，改用 ${next} …`);
+  activePort = next;
+  // 先摘掉 error 监听，避免递归触发；listen 成功后回调里会重新挂上
+  server.removeAllListeners("error");
+  server.once("error", (e) => {
+    if (e && e.code === "EADDRINUSE") {
+      if (!tryListenNextPort()) process.exit(1);
+      return;
+    }
+    console.error("启动失败: " + (e && e.message));
+    process.exit(1);
+  });
+  server.listen(activePort, "127.0.0.1");
+  return true;
+}
 
 function shutdown() {
   flushConfigNow();

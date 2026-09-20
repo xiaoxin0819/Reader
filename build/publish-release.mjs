@@ -1,4 +1,4 @@
-/* publish-release.mjs —— 把 dist/Reader-portable.zip 发到 GitHub Release
+/* publish-release.mjs —— 把 dist/Reader.zip 发到 GitHub Release
 
    为什么不把 exe 直接提交进 git：
      · exe 94 MB，接近 GitHub 单文件 100 MB 硬上限；
@@ -34,7 +34,7 @@ if (!TAG) fail('用法: node build/publish-release.mjs <tag>，例如 v1.0.1');
 if (!/^v\d+\.\d+\.\d+$/.test(TAG)) fail(`tag 格式应为 vX.Y.Z，收到：${TAG}`);
 if (!TOKEN) fail('缺少环境变量 GITHUB_TOKEN（需要 repo 权限）');
 
-const zipPath = path.join(DIST, 'Reader-portable.zip');
+const zipPath = path.join(DIST, 'Reader.zip');
 if (!fs.existsSync(zipPath)) fail(`找不到 ${zipPath}，请先运行 node build/build-exe.mjs`);
 
 const zipSize = fs.statSync(zipPath).size;
@@ -83,7 +83,7 @@ try {
     : [
       `## Reader ${TAG}`,
       '',
-      '下载下面的 **Reader-portable.zip**，解压后双击 `Reader.exe` 即可（无需安装 Node.js）。',
+      '下载下面的 **Reader.zip**，解压后双击 `Reader.exe` 即可（无需安装 Node.js）。',
       '',
       '- 首次运行自动释放内置的 31 个书源',
       '- 浏览器自动打开 http://127.0.0.1:7788/',
@@ -110,15 +110,15 @@ try {
 /* 3) 删掉同名旧附件（GitHub 不允许同名覆盖，必须删了再传） */
 const assets = await gh(`${api}/releases/${release.id}/assets`);
 for (const a of assets) {
-  if (a.name === 'Reader-portable.zip') {
+  if (a.name === 'Reader.zip') {
     step(`删除旧附件 ${a.name}（id ${a.id}）`);
     await gh(`${api}/releases/assets/${a.id}`, { method: 'DELETE' });
   }
 }
 
 /* 4) 上传新附件 */
-step('上传 Reader-portable.zip…');
-const uploadUrl = `https://uploads.github.com/repos/${REPO}/releases/${release.id}/assets?name=Reader-portable.zip`;
+step('上传 Reader.zip…');
+const uploadUrl = `https://uploads.github.com/repos/${REPO}/releases/${release.id}/assets?name=Reader.zip`;
 const buf = fs.readFileSync(zipPath);
 const uploaded = await gh(uploadUrl, {
   method: 'POST',
@@ -130,4 +130,4 @@ step(`上传完成：${(uploaded.size / 1024 / 1024).toFixed(1)} MB`);
 console.log('\n[发布完成]');
 console.log('  页面: ' + release.html_url);
 console.log('  直链: ' + uploaded.browser_download_url);
-console.log('  最新: https://github.com/' + REPO + '/releases/latest/download/Reader-portable.zip');
+console.log('  最新: https://github.com/' + REPO + '/releases/latest/download/Reader.zip');

@@ -1,6 +1,8 @@
 # ---- 用户运行时数据（不进仓库）----
 # 书架路径、阅读进度、书源开关等个人配置
 reader.config.json
+# 用户自选的端口（新建 port.txt 即可换端口，属于个人设置）
+port.txt
 # 用户自己导入的字体
 fonts/*
 !fonts/.gitkeep
