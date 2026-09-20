@@ -34,7 +34,6 @@ const SKIP_ICON = process.argv.includes("--skip-icon");
 
 /* 打包所需外部工具（首次运行自动下载并缓存到 build/.tmp） */
 const POSTJECT_URL = "https://registry.npmjs.org/postject/-/postject-1.0.0-alpha.6.tgz";
-const RCEDIT_URL = "https://github.com/electron/rcedit/releases/download/v2.0.0/rcedit-x64.exe";
 
 function fail(msg) { console.error("\n[打包失败] " + msg); process.exit(1); }
 function step(msg) { console.log("• " + msg); }
@@ -224,30 +223,25 @@ step("注入完成");
 /* ---------------- 5. 图标与版本信息 ---------------- */
 
 if (!SKIP_ICON) {
-  const rcedit = path.join(TMP, "rcedit-x64.exe");
-  if (!fs.existsSync(rcedit)) {
-    step("下载 rcedit…");
-    const dl = spawnSync("curl.exe", ["-L", "--fail", "-o", rcedit, RCEDIT_URL], { encoding: "utf8" });
-    if (dl.status !== 0) console.warn("  （rcedit 下载失败，跳过图标设置）");
-  }
   const icon = path.join(ROOT, "public", "reader.ico");
-  if (fs.existsSync(rcedit) && fs.existsSync(icon)) {
-    // rcedit 偶尔会挂住（实测：被中断后残留进程会一直占着 exe，导致后续
-    // copyFileSync 报 UNKNOWN 且无法删除）。这里给 60 秒上限，超时就放弃
-    // 图标设置（不影响 exe 可用性），避免整个打包流程卡死。
-    const r = spawnSync(rcedit, [
-      exePath, "--set-icon", icon,
-      "--set-version-string", "ProductName", APP_NAME,
-      "--set-version-string", "FileDescription", "Reader 在线阅读器",
-      "--set-file-version", VERSION,
-      "--set-product-version", VERSION,
-    ], { encoding: "utf8", timeout: 60000, killSignal: "SIGKILL" });
-    if (r.status === 0) step("已设置图标与版本信息");
-    else {
-      console.warn("  （rcedit 执行失败或超时，跳过图标设置）");
-      // 兜底：超时后 rcedit 可能仍活着并占用 exe，主动结束它
-      spawnSync("taskkill", ["/IM", "rcedit-x64.exe", "/F"], { encoding: "utf8" });
+  if (fs.existsSync(icon)) {
+    /* 用自带的 build/set-icon.mjs（纯 JS 改 PE 资源），不用 rcedit：
+       rcedit 在这种无交互会话里会挂住不退出，导致图标永远写不进去
+       （打包日志里表现为「rcedit 执行失败或超时，跳过图标设置」，
+       exe 一直带着 Node 默认的绿色方块图标）。 */
+    const r = spawnSync(NODE, [path.join(__dirname, "set-icon.mjs"), exePath, icon], {
+      encoding: "utf8", cwd: ROOT, timeout: 120000,
+    });
+    if (r.status === 0) {
+      step("已设置图标");
+      if (r.stdout) for (const line of r.stdout.trim().split("\n")) console.log("  " + line);
+    } else {
+      console.warn("  （设置图标失败，继续打包）");
+      if (r.stderr) console.warn("  " + r.stderr.trim().split("\n").join("\n  "));
+      if (r.error) console.warn("  " + r.error.message);
     }
+  } else {
+    console.warn("  （找不到 public/reader.ico，跳过图标设置）");
   }
 }
 

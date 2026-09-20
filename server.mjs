@@ -2621,6 +2621,14 @@ const server = http.createServer(async (req, res) => {
         settings: config.settings,
         progress: config.progress,
         fonts: config.fonts,
+        // 运行模式：前端据此决定是否显示「退出程序」按钮
+        // （exe 是双击运行的，用户需要一个界面上的关闭入口；源码模式关终端即可）
+        runtime: {
+          sea: IS_SEA,
+          port: activePort,
+          dataDir: __dirname,
+          pid: process.pid,
+        },
         online: {
           bookCount: config.online.books.length,
           sourceCount: sources.length,
@@ -4797,6 +4805,19 @@ async function fetchTocForBook(origin, bookUrl, timeout) {
 
     /** 前端资源指纹：client 定时比对，一旦 public/* 有新版本就自动重载。
      *  长期开着的标签页会一直跑旧 JS/CSS，这里避免「改了代码但页面没反应」。 */
+    /* 实例标识：exe 启动时用它判断「目标端口上的服务是不是同一个实例」。
+       只比对数据目录 —— 同一个数据目录 = 同一个实例（重复双击），
+       不同数据目录 = 另一个 Reader（换端口启动，不要误判成「已在运行」）。 */
+    if (p === "/api/instance") {
+      return send(res, 200, {
+        app: "Reader",
+        dataDir: __dirname,
+        sea: IS_SEA,
+        port: activePort,
+        pid: process.pid,
+      });
+    }
+
     if (p === "/api/build") {
       // exe 模式下前端资源固定嵌在 exe 里，不会热更；返回固定 token，
       // 避免 readdir 失败返回空串导致前端每次轮询都判定「有新版本」而重载。
@@ -4838,7 +4859,66 @@ server.on("upgrade", (req, socket) => {
   if (!handled) { try { socket.destroy(); } catch {} }
 });
 
-server.listen(PORT, "127.0.0.1", () => {
+/**
+ * 探测某个端口上是否已经跑着「同一个数据目录」的 Reader 实例。
+ *
+ * 为什么不能只看「端口有响应」：用户可能同时开着源码模式的调试服务、
+ * 或另一个数据目录的 exe。那些情况下应该换个端口自己跑，而不是
+ * 打开别人的页面然后退出（用户会以为「exe 没生效」）。
+ *
+ * 判据 = 对方 /api/instance 的 dataDir 与本进程一致。
+ */
+function probeSameInstance(port) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: "127.0.0.1", port, path: "/api/instance", timeout: 800 }, (r) => {
+      const chunks = [];
+      r.on("data", (c) => chunks.push(c));
+      r.on("end", () => {
+        try {
+          const j = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+          resolve(!!(j && j.app === "Reader" && j.dataDir === __dirname));
+        } catch { resolve(false); }
+      });
+    });
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => { req.destroy(); resolve(false); });
+  });
+}
+
+/**
+ * 启动入口。
+ *
+ * 先探测目标端口：
+ *   · 是同一个实例（同数据目录）→ 打开它的页面后退出，不重复起服务；
+ *   · 是别的程序 / 别的数据目录 → 继续 listen，让 error 处理去换端口。
+ * 这样「7788 被别的东西占用」时会自动换端口，而不是误判成「已在运行」。
+ */
+(async () => {
+  if (await probeSameInstance(PORT)) {
+    const url = `http://127.0.0.1:${PORT}/`;
+    console.log(`Reader 已在运行: ${url}`);
+    if (IS_SEA || process.env.READER_OPEN_BROWSER === "1") {
+      try {
+        spawn("cmd", ["/c", "start", "", url], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+      } catch { /* 打不开就算了，上面已打印地址 */ }
+    }
+    setTimeout(() => process.exit(0), IS_SEA ? 1500 : 0);
+    return;
+  }
+  server.listen(PORT, "127.0.0.1", onListening);
+})();
+
+/**
+ * 监听成功后的初始化。只执行一次。
+ *
+ * 为什么需要这个标记：换端口时会再次调用 server.listen(..., onListening)，
+ * 而 Node 会把回调注册成新的 'listening' 监听器、不清除旧的，
+ * 于是打印两遍启动日志、预热也跑两次。用标记挡住重复执行。
+ */
+let listeningInited = false;
+function onListening() {
+  if (listeningInited) return;
+  listeningInited = true;
   // PORT=0 时由系统分配，这里回填真实端口，后续所有 URL 都用它
   const addr = server.address();
   activePort = (addr && typeof addr === "object" && addr.port) ? addr.port : PORT;
@@ -4867,44 +4947,30 @@ server.listen(PORT, "127.0.0.1", () => {
       .catch((e) => console.error("启动预热最近阅读失败:", e && e.message))
       .finally(() => warmOnlineShelfBooks().catch((e) => console.error("启动预热书架失败:", e && e.message)));
   });
-});
+}
 
 /* 端口被占用时的处理。
 
-   exe 便携版最常见的情况是用户重复双击：第一次已经起了服务，第二次启动会
-   EADDRINUSE 直接崩掉，用户看到一堆红色堆栈不知道怎么办。
-   这里改成「说明已在运行 + 直接打开页面 + 退出」，与「阅读器」的行为一致。 */
-server.on("error", (e) => {
+   「同一个实例」的情况已经在启动前被 probeSameInstance() 拦掉了，
+   走到这里说明端口被**别的程序**（或另一个数据目录的 Reader）占用 ——
+   此时应该换个端口自己跑，而不是报错退出。
+
+   注意：换端口后会重新挂这个监听（见 tryListenNextPort），
+   所以必须写成具名函数，不能用匿名箭头。 */
+function onServerError(e) {
   if (e && e.code === "EADDRINUSE") {
-    const url = `http://127.0.0.1:${activePort}/`;
-    /* 两种情况要分开处理，日志也不能混：
-       · 用户没显式指定端口（重复双击 exe）→ 说明已有一个实例在跑，
-         直接打开它的页面然后退出，不要起第二个实例；
-       · 用户显式指定了端口但被占用 → 自动往后找空闲端口，
-         避免「想换端口却恰好被占用」直接失败。 */
-    if (PORT_EXPLICIT) {
-      if (tryListenNextPort()) return;
-      console.error(`端口 ${activePort} 及其后续端口都被占用，请换一个（--port 9000）`);
-      setTimeout(() => process.exit(1), 1500);
-      return;
-    }
-    console.log(`Reader 已在运行: ${url}`);
-    if (IS_SEA || process.env.READER_OPEN_BROWSER === "1") {
-      try {
-        spawn("cmd", ["/c", "start", "", url], { detached: true, stdio: "ignore", windowsHide: true }).unref();
-      } catch { /* 打不开就算了，上面已经打印地址 */ }
-    }
-    // 稍等一下再退出，让用户看清提示（双击场景窗口不会立刻消失）
-    setTimeout(() => process.exit(0), IS_SEA ? 1500 : 0);
+    if (tryListenNextPort()) return;
+    console.error(`端口 ${activePort} 及其后续 20 个端口都被占用，请手动指定（--port 9000）`);
+    setTimeout(() => process.exit(1), 1500);
     return;
   }
   console.error("启动失败: " + (e && e.message));
   process.exit(1);
-});
+}
+server.on("error", onServerError);
 
 /**
  * 端口被占用时向后找下一个可用端口（最多试 20 个）。
- * 只在用户显式指定端口时调用，避免「双击两次却起了两个实例」。
  */
 let portRetry = 0;
 function tryListenNextPort() {
@@ -4917,17 +4983,11 @@ function tryListenNextPort() {
   if (next > 65535) return false;
   console.log(`端口 ${activePort} 被占用，改用 ${next} …`);
   activePort = next;
-  // 先摘掉 error 监听，避免递归触发；listen 成功后回调里会重新挂上
+  // 摘掉旧监听后重新挂一次：新端口若再被占用，onServerError 会继续往后找
   server.removeAllListeners("error");
-  server.once("error", (e) => {
-    if (e && e.code === "EADDRINUSE") {
-      if (!tryListenNextPort()) process.exit(1);
-      return;
-    }
-    console.error("启动失败: " + (e && e.message));
-    process.exit(1);
-  });
-  server.listen(activePort, "127.0.0.1");
+  server.on("error", onServerError);
+  // listen 回调必须是 onListening：否则换了端口不会打印地址 / 开浏览器 / 预热
+  server.listen(activePort, "127.0.0.1", onListening);
   return true;
 }
 

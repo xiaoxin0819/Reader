@@ -20,5 +20,9 @@
     "@jsep-plugin/assignment": "^1.3.0",
     "@jsep-plugin/regex": "^1.0.4",
     "xpath": "^0.0.34"
+  },
+  "devDependencies": {
+    "resedit": "^2.0.0",
+    "esbuild": "^0.28.2"
   }
 }
