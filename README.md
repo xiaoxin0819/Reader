@@ -3,9 +3,21 @@
 复刻 [legado](https://github.com/xiaoxin0819/legado)（阅读）的电脑端实现。书源规则引擎、搜索/发现/详情/目录/正文解析
 全部按 legado 的 Kotlin 源码逐层移植；界面沿用本地阅读器的三栏布局，额外提供「在线」模式。
 
+## 下载（普通用户）
+
+**[⬇ 下载 Reader-portable.zip](https://github.com/xiaoxin0819/Reader/releases/latest/download/Reader-portable.zip)**（34 MB）
+
+解压后双击 `Reader.exe` 即可，**无需安装 Node.js**。
+
+- 首次运行自动释放内置的 31 个书源，浏览器自动打开 <http://127.0.0.1:7788/>
+- 数据全在 exe 同级目录（便携模式）：`reader.config.json` / `sources/` / `cache/` / `fonts/`
+- 不要放在 `C:\Program Files` 等需要管理员权限的目录
+
+全部版本见 [Releases](https://github.com/xiaoxin0819/Reader/releases)。
+
 ## 快速开始
 
-### 方式一：单文件 exe（推荐给普通用户）
+### 方式一：单文件 exe
 
 `dist/Reader-portable.zip` 解压后双击 **`Reader.exe`** 即可，无需安装 Node.js。
 
@@ -22,6 +34,17 @@ cd Reader
 npm install --no-save esbuild     # 打包脚本依赖 esbuild
 node build/build-exe.mjs          # 产出 dist/Reader.exe、dist/Reader-portable.zip
 ```
+
+发布新版本（把压缩包发到 GitHub Release，不走 git 提交二进制）：
+
+```bash
+git tag v1.0.1 && git push origin v1.0.1
+set GITHUB_TOKEN=ghp_xxx          # 需要 repo 权限
+node build/publish-release.mjs v1.0.1
+```
+
+> exe 有 94 MB，直接提交进 git 会让仓库体积暴涨（Git 对二进制不做增量），
+> 所以用 Release 附件分发 —— 不占仓库体积，且自带下载统计。
 
 打包脚本用 Node.js SEA（Single Executable Application）：
 esbuild 把 `server.mjs` 与两个 worker 打成自包含 CJS，前端资源与内置书源作为 SEA assets 嵌入，
