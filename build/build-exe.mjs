@@ -69,6 +69,17 @@ step("esbuild: " + ESBUILD);
 fs.mkdirSync(TMP, { recursive: true });
 fs.mkdirSync(DIST, { recursive: true });
 
+/* 清掉上一次运行留下的「exe 同级运行时数据」。
+   这些是调试时 exe 自己生成的（reader.config.json / sources / cache / fonts），
+   不是交付内容；留着会被误打包发给别人，泄露本机的书架与登录态。 */
+for (const name of ["reader.config.json", "sources", "cache", "fonts", "server.out.log", "server.err.log"]) {
+  const p = path.join(DIST, name);
+  if (fs.existsSync(p)) {
+    fs.rmSync(p, { recursive: true, force: true });
+    step("清理 dist/" + name);
+  }
+}
+
 const bundlePath = path.join(TMP, "bundle.cjs");
 const bookWorkerPath = path.join(TMP, "book-worker.cjs");
 const netWorkerPath = path.join(TMP, "net-worker.cjs");
@@ -241,10 +252,21 @@ if (!SKIP_ICON) {
 
 /* ---------------- 6. 冒烟测试 ---------------- */
 
+/* 冒烟测试在临时目录跑，不要在 dist/ 里跑：
+   exe 首次运行会在「exe 同级目录」生成 reader.config.json / sources/ / cache/，
+   如果直接在 dist/ 里启动，这些运行时会污染交付产物，
+   打包发给别人时容易被误当成程序的一部分一起打包出去。 */
 step("冒烟测试（启动 exe，检查是否监听端口）…");
 const SMOKE_PORT = 17788;
-const smoke = spawn(exePath, [], {
-  env: { ...process.env, PORT: String(SMOKE_PORT), READER_CACHE_DIR: path.join(TMP, "smoke-cache") },
+const SMOKE_DIR = path.join(TMP, "smoke");
+fs.rmSync(SMOKE_DIR, { recursive: true, force: true });
+fs.mkdirSync(SMOKE_DIR, { recursive: true });
+const smokeExe = path.join(SMOKE_DIR, APP_NAME + ".exe");
+fs.copyFileSync(exePath, smokeExe);
+
+const smoke = spawn(smokeExe, [], {
+  cwd: SMOKE_DIR,
+  env: { ...process.env, PORT: String(SMOKE_PORT), READER_CACHE_DIR: path.join(SMOKE_DIR, "cache") },
   stdio: ["ignore", "pipe", "pipe"],
 });
 
