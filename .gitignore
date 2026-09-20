@@ -1,0 +1,32 @@
+# ---- 用户运行时数据（不进仓库）----
+# 书架路径、阅读进度、书源开关等个人配置
+reader.config.json
+# 用户自己导入的字体
+fonts/*
+!fonts/.gitkeep
+
+# 书源组：用户自己导入/新建的分组属于个人数据，不进仓库。
+# 程序首次运行会用 sources/book-sources.json 自动播种 group-1 并生成 index.json
+#（见 server.mjs 的 ensureSourceGroups / seedSourceGroupFile）。
+sources/groups/*
+
+# ---- 运行时缓存 ----
+# 正文 / 目录 / 发现分类 / WebView（含登录态 Cookie）
+cache/
+.cache/
+*.log
+
+# ---- 依赖与构建产物 ----
+node_modules/
+dist/
+build/.tmp/
+npm-debug.log*
+
+# ---- 开发调试脚本（含大量浏览器 profile 与一次性探针）----
+.scratch/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+*.tmp
+desktop.ini

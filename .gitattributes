@@ -1,0 +1,15 @@
+* text=auto eol=lf
+
+# Windows 批处理必须是 CRLF，否则 cmd 解析异常
+*.bat text eol=crlf
+
+# 二进制资源
+*.ico binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.ttc binary
+*.png binary
+*.jpg binary
+*.jpeg binary

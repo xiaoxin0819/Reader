@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reader · 在线阅读器</title>
+<link rel="icon" href="reader.ico">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="online.css">
+</head>
+<body data-theme="light">
+
+<header class="topbar">
+  <div class="left">
+    <div class="mode-switch" title="切换本地 / 在线">
+      <button data-mode="local" class="on">本地</button>
+      <button data-mode="online">在线</button>
+    </div>
+    <button id="btnShelf" class="icon-btn" title="切换书架">☰</button>
+    <select id="shelfSelect" class="shelf-select"></select>
+    <button id="btnSearch" class="ghost-btn only-online" title="搜索在线书籍">🔍 搜索</button>
+    <button id="btnSources" class="ghost-btn only-online" title="书源管理">书源</button>
+    <button id="btnExplore" class="ghost-btn only-online" title="书源发现页">发现</button>
+    <button id="btnAddShelf" class="ghost-btn" title="导入文件夹为书架">+ 导入文件夹</button>
+    <button id="btnManageShelves" class="ghost-btn" title="管理已导入的书架">管理</button>
+  </div>
+  <div class="center">
+    <div id="bookTitle" class="book-title">未选择书籍</div>
+    <div id="bookMeta" class="book-meta"></div>
+  </div>
+  <div class="right">
+    <button id="btnPrevBook" class="icon-btn nav-book" title="上一本（Alt+←）">‹‹</button>
+    <button id="btnNextBook" class="icon-btn nav-book" title="下一本（Alt+→）">››</button>
+    <span class="vsep"></span>
+    <button id="btnChangeSource" class="icon-btn only-online" title="换源（按书名+作者重新搜源）">⇄</button>
+    <button id="btnRefresh" class="icon-btn only-online" title="重新抓取本章正文（换源/清缓存后用它兜底）">⟳</button>
+    <button id="btnReplace" class="icon-btn" title="替换净化 / TXT 目录规则">✎</button>
+    <button id="btnPool" class="icon-btn only-online" title="抓取池状态">⚡</button>
+    <button id="btnClearCache" class="icon-btn only-online" title="清空在线缓存">🗑</button>
+    <span class="vsep only-online"></span>
+    <button id="btnTheme" class="icon-btn" title="切换主题">◐</button>
+    <button id="btnSettings" class="icon-btn" title="阅读设置">⚙</button>
+    <button id="btnToc" class="icon-btn" title="目录">☷</button>
+  </div>
+</header>
+
+<main class="layout">
+  <aside id="sidebar" class="sidebar">
+    <div class="sidebar-head">
+      <span class="sidebar-title">书架</span>
+      <div class="sidebar-tools">
+        <input id="bookFilter" class="mini-input" placeholder="筛选书名 / 作者…">
+        <select id="bookSort" class="mini-select">
+          <option value="name">按书名</option>
+          <option value="size">按大小</option>
+          <option value="mtime">按时间</option>
+          <option value="read">按阅读进度</option>
+        </select>
+      </div>
+      <div class="shelf-actions only-online">
+        <button id="bookChangeAll" class="mini-btn shelf-tool-btn" title="为书架全部书籍一键换源">⇄ 一键换源</button>
+        <button id="bookManage" class="mini-btn shelf-tool-btn" title="快速管理在线书架">☷ 书架管理</button>
+      </div>
+      <div id="shelfPath" class="shelf-path"></div>
+    </div>
+    <div id="bookList" class="book-list"></div>
+    <div class="pager">
+      <button id="bkPrev" class="pg-btn">‹</button>
+      <span id="bkPageInfo" class="pg-info">0 / 0</span>
+      <button id="bkNext" class="pg-btn">›</button>
+    </div>
+  </aside>
+
+  <div class="reader-col">
+    <section id="reader" class="reader">
+      <div id="chapterHead" class="chapter-head"></div>
+      <div class="quick-nav">
+        <button id="qnPrev" class="qn-btn" title="上一章">
+          <span class="qn-arrow">‹</span><span class="qn-text">上一章</span>
+        </button>
+        <button id="qnNext" class="qn-btn primary" title="下一章">
+          <span class="qn-text">下一章</span><span class="qn-arrow">›</span>
+        </button>
+        <div id="qnName" class="qn-name"></div>
+      </div>
+      <div id="payHint" class="pay-hint hidden">
+        <span class="ph-ico">🔒</span>
+        <span id="payHintText" class="ph-text"></span>
+        <button id="payHintSwap" class="ghost-btn">换源</button>
+        <button id="payHintClose" class="icon-btn" title="关闭">✕</button>
+      </div>
+      <div id="content" class="content">
+        <div class="empty-hint">从左侧书架选一本书开始阅读</div>
+      </div>
+      <button id="endHint" class="end-hint" title="下一章">下一章 ›</button>
+    </section>
+
+    <footer class="bottombar">
+      <button id="btnChapterCollapse" class="icon-btn" title="收起/展开书目与目录">⇱</button>
+      <button id="btnPrev" class="nav-btn">上一本</button>
+      <div class="progress-wrap">
+        <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+        <div id="progressText" class="progress-text">—</div>
+      </div>
+      <button id="btnNext" class="nav-btn">下一本</button>
+      <button id="btnTop" class="icon-btn" title="回到顶部">⇧</button>
+    </footer>
+  </div>
+
+  <aside id="toc" class="toc">
+    <div class="toc-head">
+      <span>目录</span>
+      <span class="toc-tools">
+        <span id="tocCount" class="toc-count"></span>
+        <button id="tocTop" class="toc-order" title="目录回到顶部">⇧</button>
+        <button id="tocOrder" class="toc-order">正序</button>
+      </span>
+    </div>
+    <div id="tocList" class="toc-list"></div>
+  </aside>
+</main>
+
+<!-- 选文件夹 -->
+<div id="modalBrowse" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span>选择文件夹</span>
+      <button id="browseClose" class="icon-btn">✕</button>
+    </div>
+    <div class="browse-bar">
+      <button id="browseUp" class="ghost-btn">↑ 上级</button>
+      <input id="browsePath" class="browse-path" spellcheck="false">
+      <button id="browseGo" class="ghost-btn">转到</button>
+    </div>
+    <div id="browseList" class="browse-list"></div>
+    <div class="modal-foot">
+      <span id="browseHint" class="hint"></span>
+      <button id="browsePick" class="primary-btn">导入此文件夹</button>
+    </div>
+  </div>
+</div>
+
+<!-- 管理书架 -->
+<div id="modalShelves" class="modal hidden">
+  <div class="modal-box small">
+    <div class="modal-head">
+      <span>管理书架</span>
+      <button id="shelfClose" class="icon-btn">✕</button>
+    </div>
+    <div id="shelfList" class="shelf-mgr"></div>
+    <div class="modal-foot">
+      <span class="hint">移除书架只是取消导入，不会删除磁盘上的 txt 文件</span>
+      <button id="shelfMgrDone" class="primary-btn">完成</button>
+    </div>
+  </div>
+</div>
+
+<!-- 阅读设置 -->
+<div id="modalSettings" class="modal hidden">
+  <div class="modal-box small">
+    <div class="modal-head">
+      <span>阅读设置</span>
+      <button id="setClose" class="icon-btn">✕</button>
+    </div>
+    <div class="settings-body">
+      <label class="row"><span>字号</span><input id="setFontSize" type="range" min="14" max="34" step="1"><b id="vFontSize"></b></label>
+      <label class="row"><span>行距</span><input id="setLineHeight" type="range" min="1.2" max="3" step="0.05"><b id="vLineHeight"></b></label>
+      <label class="row"><span>首行缩进</span><input id="setIndent" type="range" min="0" max="4" step="0.5"><b id="vIndent"></b></label>
+      <label class="row"><span>字距</span><input id="setLetter" type="range" min="0" max="3" step="0.5"><b id="vLetter"></b></label>
+      <label class="row"><span>版心宽度</span><input id="setMaxWidth" type="range" min="520" max="1400" step="20"><b id="vMaxWidth"></b></label>
+      <label class="row"><span>字体</span>
+        <select id="setFamily">
+          <option value="serif">宋体 / 衬线</option>
+          <option value="song">思源宋体</option>
+          <option value="kai">楷体</option>
+          <option value="hei">黑体</option>
+        </select><b></b>
+      </label>
+      <label class="row check"><span>自动下一章</span>
+        <input id="setAutoNext" type="checkbox">
+        <b></b>
+      </label>
+      <div class="font-block">
+        <div class="font-head">
+          <span>自定义字体</span>
+          <button id="btnAddFont" class="ghost-btn">+ 添加字体文件</button>
+        </div>
+        <div id="fontList" class="font-list"></div>
+        <input id="fontFile" type="file" accept=".ttf,.otf,.woff,.woff2,.ttc" hidden>
+      </div>
+      <!-- 书源抓取并发数（worker 池大小）。legado 里对应 okHttpClient 的 Dispatcher
+           并发线程数；这里按用户机器性能可调。改完立即生效，不需要重启服务。 -->
+      <div class="row pool-block only-online">
+        <span>书源并发数</span>
+        <input id="setPoolSize" type="range" min="1" max="16" step="1">
+        <b id="vPoolSize"></b>
+      </div>
+      <div class="hint pool-hint only-online" id="poolHint">
+        调大：多书源搜索 / 发现更快，但同一书源的连接会被分散。<br>
+        调小：单本正文连接复用更充分，但多源并发变低。
+      </div>
+      <div class="row-btns">
+        <button id="setReset" class="ghost-btn">恢复默认</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="immersiveHint" class="immersive-hint">点击正文中间区域可隐藏 / 显示工具栏</div>
+<div id="toast" class="toast"></div>
+<script src="app.js"></script>
+<!-- ============ 在线扩展：面板 ============ -->
+<div id="panelSearch" class="panel hidden">
+  <div class="panel-box wide">
+    <div class="panel-head">
+      <span>搜索书籍</span>
+      <button class="icon-btn" data-close="panelSearch">✕</button>
+    </div>
+    <div class="search-bar">
+      <input id="searchKey" class="search-input" placeholder="书名 / 作者…" spellcheck="false">
+      <input id="searchAuthor" class="search-input author-input" placeholder="作者（选填，用于精确搜索）" spellcheck="false">
+      <button id="searchGo" class="primary-btn">搜索</button>
+      <button id="searchStop" class="ghost-btn hidden">停止</button>
+      <label class="chk"><input id="searchPrecise" type="checkbox">精确匹配</label>
+      <span id="searchStat" class="hint"></span>
+    </div>
+    <div id="searchProgress" class="search-progress hidden">
+      <div class="sp-head"><span id="spText" class="sp-text">准备中…</span>
+        <div class="sp-bar"><div id="spFill" class="sp-fill"></div></div></div>
+      <div id="spSources" class="sp-sources"></div>
+    </div>
+    <details id="srcPickWrap" class="src-pick">
+      <summary>选择书源（默认全部启用）</summary>
+      <div id="searchSources"></div>
+    </details>
+    <div id="searchGroupBar" class="search-group-bar hidden">
+      <span id="sgText" class="sg-text"></span>
+      <button id="sgCollapseAll" class="mini-btn" type="button">收起</button>
+      <button id="sgExpandAll" class="mini-btn" type="button">展开</button>
+    </div>
+    <div id="searchResults" class="results"></div>
+    <div id="searchPager" class="pager search-pager hidden">
+      <button id="spPrev" class="pg-btn">‹ 上一页</button>
+      <span id="spPageInfo" class="pg-info">第 1 页</span>
+      <button id="spNext" class="pg-btn">下一页 ›</button>
+      <button id="spAll" class="pg-btn" title="连续加载后续页（最多 20 页）">加载全部</button>
+    </div>
+  </div>
+</div>
+
+<div id="panelSources" class="panel hidden">
+  <div class="panel-box wide">
+    <div class="panel-head">
+      <span>书源管理</span>
+      <button class="icon-btn" data-close="panelSources">✕</button>
+    </div>
+    <div class="src-groupbar">
+      <label class="src-group-label" for="sourceGroupSelect">书源组</label>
+      <select id="sourceGroupSelect" class="mini-select"></select>
+      <button id="srcGroupCreate" class="ghost-btn" type="button">新建</button>
+      <button id="srcGroupRename" class="ghost-btn" type="button">重命名</button>
+      <button id="srcGroupDelete" class="ghost-btn" type="button">删除</button>
+      <span id="sourceGroupStat" class="hint"></span>
+    </div>
+    <div class="src-toolbar">
+      <input id="sourceFilter" class="mini-input" placeholder="筛选书源…">
+      <button id="srcImport" class="ghost-btn">导入文件</button>
+      <button id="srcImportUrl" class="ghost-btn">从网址导入</button>
+      <button id="srcPaste" class="ghost-btn">粘贴 JSON</button>
+      <button id="srcExport" class="ghost-btn">导出全部</button>
+    </div>
+    <div class="src-listbar">
+      <span id="sourceStat" class="hint"></span>
+      <div class="src-listbar-acts">
+        <button id="srcSelAll" class="mini-btn" title="启用当前列表中的全部书源（跟随上方筛选）">全选</button>
+        <button id="srcSelInvert" class="mini-btn" title="反转当前列表中书源的启用状态（跟随上方筛选）">反选</button>
+      </div>
+    </div>
+    <div id="sourceList" class="src-list"></div>
+    <input id="srcFile" type="file" accept=".json,.txt" hidden>
+  </div>
+</div>
+
+<div id="panelExplore" class="panel hidden">
+  <div class="panel-box wide">
+    <div class="panel-head">
+      <span>发现</span>
+      <button class="icon-btn" data-close="panelExplore">✕</button>
+    </div>
+    <div class="exp-bar">
+      <select id="exploreSource" class="mini-select"></select>
+      <button id="exploreRefresh" class="icon-btn" title="刷新发现（清空分类缓存并重新执行规则）">⟳</button>
+    </div>
+    <div id="exploreKinds" class="chip-row"></div>
+  </div>
+</div>
+
+<!-- 发现结果：照 legado ui/main/explore/ExploreShowActivity —— 分类点开后是**独立页面**，
+     标题栏 + 全屏列表（原先把列表塞在发现页里只剩 180px，下面一片空白）。 -->
+<div id="panelExploreResult" class="panel hidden">
+  <div class="panel-box wide exp-res-box">
+    <div class="panel-head exp-res-head">
+      <button class="icon-btn" id="expBack" title="返回分类">‹</button>
+      <span id="expResHead">发现</span>
+      <button class="icon-btn" data-close="panelExploreResult">✕</button>
+    </div>
+    <div id="expLoading" class="exp-loading hidden">正在加载…</div>
+    <div id="exploreBooks" class="results"></div>
+  </div>
+</div>
+
+<!-- 需求 7：书籍详情页（legado ui/book/info/BookInfoActivity） -->
+<div id="panelBookInfo" class="panel hidden">
+  <div class="panel-box wide">
+    <div class="panel-head">
+      <span id="biHead">书籍详情</span>
+      <button class="icon-btn" data-close="panelBookInfo">✕</button>
+    </div>
+    <!-- 版式照 legado res/layout/activity_book_info.xml：
+         左栏封面 + 双按钮（放入书架 / 阅读），右栏信息行（每行带图标）+ 简介；目录入口只在左栏「查看目录」，弹窗展示 -->
+    <div class="bi-body">
+      <div class="bi-left">
+        <div id="biCover" class="bi-cover"></div>
+        <div class="bi-acts">
+          <button id="biAdd" class="bi-btn bi-btn-shelf">放入书架</button>
+          <button id="biRead" class="bi-btn bi-btn-read">阅读</button>
+        </div>
+        <div class="bi-acts-sub">
+          <button id="biSwap" class="bi-btn bi-btn-sub"><span class="bi-ico-s">⇄</span>换源</button>
+          <button id="biExport" class="bi-btn bi-btn-sub"><span class="bi-ico-s">⤓</span>导出 TXT</button>
+        </div>
+        <div class="bi-acts-sub">
+          <button id="biTocView" class="bi-btn bi-btn-sub"><span class="bi-ico-s">☰</span>查看目录</button>
+          <button id="biReload" class="bi-btn bi-btn-sub"><span class="bi-ico-s">⟳</span>刷新详情</button>
+        </div>
+      </div>
+      <div class="bi-right">
+        <div id="biName" class="bi-name">—</div>
+        <div id="biTags" class="bi-tags"></div>
+        <div class="bi-rows">
+          <div class="bi-row"><span class="bi-ico">⊙</span><span class="bi-val" id="biAuthor">—</span></div>
+          <div class="bi-row"><span class="bi-ico">📖</span><span class="bi-val" id="biOrigin">—</span></div>
+          <div class="bi-row"><span class="bi-ico">🕘</span><span class="bi-val" id="biLatest">—</span></div>
+          <div class="bi-row"><span class="bi-ico">📁</span><span class="bi-val" id="biTocBrief">—</span></div>
+        </div>
+        <div class="bi-sec-head">简介</div>
+        <div id="biIntro" class="bi-intro">—</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 需求 1：完整目录弹窗（详情页左栏「查看目录」打开；右上角 ⇧/⇩ 跳章节头/尾） -->
+<div id="tocModal" class="toc-modal hidden">
+  <div class="tocm-box">
+    <div class="tocm-head">
+      <span class="tocm-title">目录</span>
+      <span id="tocmCount" class="hint"></span>
+      <div class="tocm-tools">
+        <button id="tocmTop" class="tocm-jump" title="跳到第一章">⇧</button>
+        <button id="tocmBottom" class="tocm-jump" title="跳到最后一章">⇩</button>
+      </div>
+      <button id="tocmClose" class="icon-btn" title="关闭">✕</button>
+    </div>
+    <div id="tocmList" class="tocm-list"></div>
+  </div>
+</div>
+<!-- 需求 A：导出 TXT 弹窗（照 legado CacheBook 的缓存进度：可设并发 + 进度条 + 逐章日志） -->
+<div id="exportModal" class="toc-modal hidden">
+  <div class="tocm-box expm-box">
+    <div class="tocm-head">
+      <span class="tocm-title" id="expHead">导出 TXT</span>
+      <span id="expCount" class="hint"></span>
+      <button id="expClose" class="icon-btn" title="关闭">✕</button>
+    </div>
+    <div class="exp-params">
+      <label class="exp-field"><span>并发数</span><input id="expConc" type="number" min="1" max="9" step="1"><em id="expConcHint" class="hint"></em></label>
+      <label class="exp-field"><span>章间隔</span><input id="expGap" type="number" min="0" max="5000" step="50"><em class="hint">毫秒</em></label>
+      <span class="hint">并发越高越快，间隔越大越不容易被站点封 IP</span>
+    </div>
+    <div class="exp-progress">
+      <div class="sp-head"><span id="expText" class="sp-text">等待开始…</span>
+        <div class="sp-bar"><div id="expFill" class="sp-fill"></div></div></div>
+    </div>
+    <div id="expLog" class="exp-log"></div>
+    <div class="exp-foot">
+      <button id="expCancel" class="ghost-btn">取消</button>
+      <button id="expStart" class="primary-btn">开始导出</button>
+      <button id="expSave" class="primary-btn hidden">保存 TXT</button>
+    </div>
+  </div>
+</div>
+<!-- 用户需求 1：书架一键换源（照 legado BookshelfManageActivity 书架菜单「换源」+ SourcePickerDialog）
+     进度文案对齐 legado batchChangeSourceProcessLiveData 的「3 / 12」；
+     每本间隔对应 AppConfig.batchChangeSourceDelay（单位秒，SourcePickerDialog 菜单可调）。 -->
+<div id="changeAllModal" class="toc-modal hidden">
+  <div class="tocm-box expm-box">
+    <div class="tocm-head">
+      <span class="tocm-title" id="caHead">书架一键换源</span>
+      <span id="caCount" class="hint"></span>
+      <button id="caClose" class="icon-btn" title="关闭">✕</button>
+    </div>
+    <div class="exp-params">
+      <label class="exp-field"><span>目标书源</span>
+        <select id="caSource" class="mini-select ca-src"></select></label>
+      <label class="exp-field"><span>每本间隔</span>
+        <input id="caDelay" type="number" min="0" max="9999" step="1"><em class="hint">秒</em></label>
+      <span class="hint">按「书名 + 作者」在新源精确搜索，逐本串行执行</span>
+    </div>
+    <div id="caResult" class="ca-result hidden"></div>
+    <div class="exp-progress">
+      <div class="sp-head"><span id="caText" class="sp-text">等待开始…</span>
+        <div class="sp-bar"><div id="caFill" class="sp-fill"></div></div></div>
+    </div>
+    <div id="caLog" class="exp-log"></div>
+    <div class="exp-foot">
+      <button id="caCancel" class="ghost-btn">取消</button>
+      <button id="caStart" class="primary-btn">开始换源</button>
+    </div>
+  </div>
+</div>
+<!-- 缓存与数据位置：legado 设置页「缓存管理」的桌面形态。
+     所有缓存都在 Reader 文件夹内，用户可一眼看到目录体积并直接打开文件夹清理。 -->
+<div id="storageModal" class="toc-modal hidden">
+  <div class="tocm-box cache-box">
+    <div class="tocm-head">
+      <span class="tocm-title">缓存与数据位置</span>
+      <span id="storageSummary" class="hint">读取中…</span>
+      <button id="storageClose" class="icon-btn" title="关闭">✕</button>
+    </div>
+    <div class="cache-body">
+      <div class="cache-path-label">缓存目录设置</div>
+      <div class="cache-dir-row">
+        <input id="storageDir" class="mini-input cache-dir-input" placeholder="绝对路径，例如 D:\ReaderCache" spellcheck="false">
+        <button id="storageDirSave" class="ghost-btn">保存位置</button>
+        <button id="storageDirDefault" class="ghost-btn">恢复默认</button>
+      </div>
+      <div id="storageDirHint" class="hint cache-dir-hint">修改后需重启 Reader 生效；旧目录中的缓存不会自动搬移。</div>
+      <div id="storageList" class="cache-list"></div>
+      <div id="storageWebviewDetail" class="cache-webview"></div>
+      <div class="cache-note">正文、目录、发现分类、登录 WebView 数据统一保存在 Reader 文件夹内；删除整个 Reader 文件夹不会在系统其他位置留下这些缓存。<br>「登录 WebView 数据」分两类：HTTP / 代码 / GPU / Edge 组件缓存属于可再生缓存，可单独清理；Cookies、Local Storage、IndexedDB 等承载登录态的数据始终保留，清理后无需重新登录。</div>
+    </div>
+    <div class="cache-foot">
+      <button id="storageOpen" class="ghost-btn">打开缓存文件夹</button>
+      <button id="storageRefresh" class="ghost-btn">刷新占用</button>
+      <button id="storageWebviewClear" class="ghost-btn">清理 WebView 缓存</button>
+      <button id="storageClear" class="primary-btn">清理阅读缓存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 书架管理：对应 legado BookshelfManageActivity / SelectActionBar -->
+<div id="shelfManageModal" class="toc-modal hidden">
+  <div class="tocm-box shelf-manage-box">
+    <div class="tocm-head shelf-manage-head">
+      <span class="tocm-title">书架管理</span><span id="smCount" class="hint"></span>
+      <input id="smSearch" class="mini-input sm-search" placeholder="搜索书名 / 作者 / 书源…">
+      <button id="smMore" class="tocm-jump" title="更多操作">⋮</button>
+      <button id="smClose" class="icon-btn" title="关闭">✕</button>
+    </div>
+    <div id="smList" class="shelf-manage-list"></div>
+    <div class="shelf-manage-bar">
+      <label class="sm-all"><input id="smAll" type="checkbox"> 全选</label>
+      <button id="smReverse" class="mini-btn">反选</button>
+      <span id="smSelected" class="hint">未选择</span>
+    </div>
+  </div>
+</div>
+<!-- 需求 5a：换源（legado ui/book/changesource/ChangeSourceActivity） -->
+<div id="panelChangeSource" class="panel hidden">
+  <div class="panel-box wide">
+    <div class="panel-head">
+      <span id="csHead">换源</span>
+      <button class="icon-btn" data-close="panelChangeSource">✕</button>
+    </div>
+    <div class="cs-bar">
+      <span id="csStat" class="hint"></span>
+      <button id="csRescan" class="ghost-btn">重新搜索</button>
+    </div>
+    <div id="csList" class="results"></div>
+  </div>
+</div>
+
+<!-- 替换净化 / TXT 目录规则：对齐 legado ReplaceRuleActivity 与 TxtTocRuleActivity。
+     两个页面共用窗口，Tab 切换；TXT 规则同时作用于本地分章与右侧目录。 -->
+<div id="panelReplace" class="panel hidden">
+  <div class="panel-box replace-panel">
+    <div class="panel-head">
+      <span id="replacePanelTitle">替换净化</span>
+      <button class="icon-btn" data-close="panelReplace">✕</button>
+    </div>
+    <div class="replace-tabs" id="replaceTabs">
+      <button class="rt-tab active" data-rtab="replace">替换净化</button>
+      <button class="rt-tab" data-rtab="txtToc">TXT 目录规则</button>
+    </div>
+
+    <section id="replacePane" class="replace-pane">
+      <div class="src-groupbar">
+      <label class="src-group-label" for="sourceGroupSelect">书源组</label>
+      <select id="sourceGroupSelect" class="mini-select"></select>
+      <button id="srcGroupCreate" class="ghost-btn" type="button">新建</button>
+      <button id="srcGroupRename" class="ghost-btn" type="button">重命名</button>
+      <button id="srcGroupDelete" class="ghost-btn" type="button">删除</button>
+      <span id="sourceGroupStat" class="hint"></span>
+    </div>
+    <div class="src-toolbar">
+        <input id="replaceFilter" class="mini-input" placeholder="搜索规则…">
+        <button id="replaceBuiltin" class="ghost-btn">恢复内置规则</button>
+        <button id="replaceAdd" class="ghost-btn">新建规则</button>
+        <button id="replaceImport" class="ghost-btn">本地导入</button>
+        <button id="replaceImportUrl" class="ghost-btn">网络导入</button>
+        <button id="replaceTest" class="ghost-btn">测试替换</button>
+        <span id="replaceStat" class="hint"></span>
+      </div>
+      <div id="replaceList" class="src-list"></div>
+      <div id="replaceSelBar" class="replace-selbar">
+        <div class="rsb-btns">
+          <button class="mini-btn" data-sel="all">全选</button>
+          <button class="mini-btn" data-sel="invert">反选</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="txtTocPane" class="replace-pane hidden">
+      <div class="src-groupbar">
+      <label class="src-group-label" for="sourceGroupSelect">书源组</label>
+      <select id="sourceGroupSelect" class="mini-select"></select>
+      <button id="srcGroupCreate" class="ghost-btn" type="button">新建</button>
+      <button id="srcGroupRename" class="ghost-btn" type="button">重命名</button>
+      <button id="srcGroupDelete" class="ghost-btn" type="button">删除</button>
+      <span id="sourceGroupStat" class="hint"></span>
+    </div>
+    <div class="src-toolbar">
+        <input id="txtTocFilter" class="mini-input" placeholder="搜索目录规则…">
+        <button id="txtTocAdd" class="ghost-btn">新增</button>
+        <button id="txtTocImport" class="ghost-btn">本地导入</button>
+        <button id="txtTocImportUrl" class="ghost-btn">网络导入</button>
+        <button id="txtTocBuiltin" class="ghost-btn">导入默认规则</button>
+        <span id="txtTocStat" class="hint"></span>
+      </div>
+      <div id="txtTocList" class="src-list"></div>
+      <div id="txtTocSelBar" class="replace-selbar">
+        <div class="rsb-btns">
+          <button class="mini-btn" data-sel="all">全选</button>
+          <button class="mini-btn" data-sel="invert">反选</button>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<div id="debugBox" class="panel hidden">
+  <div class="panel-box wide">
+    <div class="panel-head">
+      <span>书源调试</span>
+      <button class="icon-btn" data-close="debugBox">✕</button>
+    </div>
+    <pre id="debugLog" class="debug-log"></pre>
+  </div>
+</div>
+
+<div id="verifyBox" class="verify-box hidden">
+  <div class="vb-head">
+    <span>需要人工验证</span>
+    <button id="verifyClose" class="icon-btn">✕</button>
+  </div>
+  <div class="vb-body">
+    <div id="verifyMsg" class="vb-msg"></div>
+    <div id="verifyCount" class="hint"></div>
+    <a id="verifyOpen" class="ghost-btn" target="_blank" rel="noopener">打开验证页面</a>
+    <input id="verifyResult" class="mini-input" placeholder="把验证结果（cookies / 链接）粘贴到这里">
+    <input id="verifyKey" type="hidden">
+    <button id="verifySubmit" class="primary-btn">提交，继续抓取</button>
+  </div>
+</div>
+
+<script src="online.js"></script>
+</body>
