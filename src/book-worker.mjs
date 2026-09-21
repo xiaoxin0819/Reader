@@ -1107,6 +1107,17 @@ parentPort.on('message', (msg) => {
   }
 });
 
+/* exe（SEA）模式下，本线程还要再起 net-worker（sync-net 的嵌套 worker），
+   而 worker 线程之间不共享 globalThis —— 父线程注入的
+   __READER_WORKER_SRC__ 在这里是看不到的。
+   主线程已把 net-worker 源码通过 workerData.__netWorkerSrc 传下来，
+   这里重新注入到本线程的 globalThis，供 exe-env.createWorker('netWorker') 取用。
+   不加这段的话：嵌套 worker 起不来 → 网络请求静默挂死 → 报「任务超时」。 */
+if (workerData && workerData.__netWorkerSrc) {
+  globalThis.__READER_WORKER_SRC__ = { netWorker: workerData.__netWorkerSrc };
+  globalThis.__READER_IS_SEA__ = true;
+}
+
 // 启动即初始化（workerData 里可带初始书源）
 if (workerData && workerData.sources) {
   try {

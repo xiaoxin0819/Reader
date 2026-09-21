@@ -15,7 +15,7 @@ import path from "node:path";
 import vm from "node:vm";
 import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
-import { IS_SEA, readAsset } from "./src/exe-env.mjs";
+import { isSea, readAsset } from "./src/exe-env.mjs";
 
 /* exe（SEA）模式：内置规则 JSON 打包进 exe，磁盘上没有 sources/*.json。
    这里包一层 fs.readFileSync：找不到文件时回退到 SEA assets。
@@ -25,7 +25,7 @@ const SEA_BUILTIN_FILES = new Set([
   "builtin-replace-rules.json",
   "builtin-txt-toc-rules.json",
 ]);
-if (IS_SEA) {
+if (isSea()) {
   const origReadFileSync = fs.readFileSync.bind(fs);
   fs.readFileSync = function (p, ...rest) {
     try {
@@ -72,7 +72,7 @@ import { pickTocRule, analyzeByTocRule, makeLineIndexer, tocRuleFingerprint, get
  * 这样 exe 旁边的 reader.config.json / cache / sources 仍能被正常读写，
  * 用户把 exe 放到哪，数据就在哪，不会污染系统盘其它位置。
  */
-const __dirname = IS_SEA
+const __dirname = isSea()
   ? path.dirname(process.execPath)
   : path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -832,7 +832,7 @@ function seedSourceGroupFile(file) {
   /* exe（SEA）模式：磁盘上只有 exe 一个文件，书源打包在 assets 里。
      首次运行时把内置书源「释放」到 exe 同级目录，之后用户就能像开发模式
      一样在「书源管理」里增删改 —— 界面写的是磁盘上的 sources/groups/*.json。 */
-  if (IS_SEA) {
+  if (isSea()) {
     const builtin = readAsset("book-sources.json");
     if (builtin) {
       fs.writeFileSync(file, builtin, "utf8");
@@ -1969,7 +1969,7 @@ async function serveStatic(res, urlPath) {
   catch { return send(res, 403, { error: "禁止" }); }
   if (rel === "/" || rel === "") rel = "/index.html";
   // exe（SEA）模式：前端资源打包进 exe，磁盘上没有 public/ 目录
-  if (IS_SEA) {
+  if (isSea()) {
     const name = String(rel).replace(/^\/+/, "");
     const buf = readAsset(name);
     if (!buf) return send(res, 404, { error: "未找到" });
@@ -2624,7 +2624,7 @@ const server = http.createServer(async (req, res) => {
         // 运行模式：前端据此决定是否显示「退出程序」按钮
         // （exe 是双击运行的，用户需要一个界面上的关闭入口；源码模式关终端即可）
         runtime: {
-          sea: IS_SEA,
+          sea: isSea(),
           port: activePort,
           dataDir: __dirname,
           pid: process.pid,
@@ -4812,7 +4812,7 @@ async function fetchTocForBook(origin, bookUrl, timeout) {
       return send(res, 200, {
         app: "Reader",
         dataDir: __dirname,
-        sea: IS_SEA,
+        sea: isSea(),
         port: activePort,
         pid: process.pid,
       });
@@ -4821,7 +4821,7 @@ async function fetchTocForBook(origin, bookUrl, timeout) {
     if (p === "/api/build") {
       // exe 模式下前端资源固定嵌在 exe 里，不会热更；返回固定 token，
       // 避免 readdir 失败返回空串导致前端每次轮询都判定「有新版本」而重载。
-      if (IS_SEA) return send(res, 200, { token: "sea-" + (process.env.READER_BUILD_TOKEN || "1") });
+      if (isSea()) return send(res, 200, { token: "sea-" + (process.env.READER_BUILD_TOKEN || "1") });
       try {
         const names = (await fsp.readdir(PUBLIC_DIR)).filter((n) => /\.(?:js|css|html)$/i.test(n)).sort();
         const parts = [];
@@ -4897,12 +4897,12 @@ function probeSameInstance(port) {
   if (await probeSameInstance(PORT)) {
     const url = `http://127.0.0.1:${PORT}/`;
     console.log(`Reader 已在运行: ${url}`);
-    if (IS_SEA || process.env.READER_OPEN_BROWSER === "1") {
+    if (isSea() || process.env.READER_OPEN_BROWSER === "1") {
       try {
         spawn("cmd", ["/c", "start", "", url], { detached: true, stdio: "ignore", windowsHide: true }).unref();
       } catch { /* 打不开就算了，上面已打印地址 */ }
     }
-    setTimeout(() => process.exit(0), IS_SEA ? 1500 : 0);
+    setTimeout(() => process.exit(0), isSea() ? 1500 : 0);
     return;
   }
   server.listen(PORT, "127.0.0.1", onListening);
@@ -4931,7 +4931,7 @@ function onListening() {
      用户拿到的只有一个 Reader.exe，不打开浏览器的话不知道要访问哪个地址。
      开发模式（npm start / 启动Reader.bat）不自动开，避免每次重启都弹窗；
      需要时用 READER_OPEN_BROWSER=1 强制打开。 */
-  if (IS_SEA || process.env.READER_OPEN_BROWSER === "1") {
+  if (isSea() || process.env.READER_OPEN_BROWSER === "1") {
     const url = `http://127.0.0.1:${activePort}/`;
     try {
       // 用系统默认浏览器打开（Windows: start 是 cmd 内置命令，必须走 cmd）
