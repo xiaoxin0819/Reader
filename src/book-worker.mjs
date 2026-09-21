@@ -620,6 +620,22 @@ function taskLoginInfo(payload) {
   const loginUiText = s.loginUi == null ? '' : String(s.loginUi).trim();
   const loginWebUrl = isAbsUrlLogin(loginJs) ? loginJs
     : (isAbsUrlLogin(loginUiText) ? loginUiText : null);
+  /**
+   * 书源变量（sourceVariable_*）—— 服务端解析「相对地址」时要拿站点基址。
+   *
+   * 为什么需要：光遇聚合这类书源的 bookSourceUrl 是字面量「光遇聚合」而非网址，
+   * 真正的域名存在变量「线路」/「云端配置.hosts」里。内置浏览器打开 /register
+   * 这种相对路径时，必须用变量里的域名拼绝对地址（对齐 legado NetworkUtils.getAbsoluteURL）。
+   * 只回传 JSON 形态的变量，避免把大对象/二进制塞进 worker 回包。
+   */
+  let sourceVariables = null;
+  try {
+    const raw = wrapped.getVariable();
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') sourceVariables = parsed;
+    }
+  } catch (e) { sourceVariables = null; }
   return {
     // BaseSource.getTag() = bookSourceName；SourceLoginDialog:708 / WebViewLoginFragment:50
     // 用它拼 R.string.login_source（"登录 %s"）作为窗口标题
@@ -633,6 +649,7 @@ function taskLoginInfo(payload) {
     // 内置浏览器（WebViewLoginFragment）可用的登录页地址；loginUrl 非 URL 时回落到 URL 形态的 loginUi
     loginWebUrl,
     headerMap,
+    sourceVariables,
     userAgent: headerMap['User-Agent'] || headerMap['user-agent'] || null,
     actions: normalizeLoginActions(actions),
   };

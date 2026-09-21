@@ -153,8 +153,8 @@ body.hide-toc .toc{margin-right:-280px}
   background:var(--panel);border-radius:14px;width:min(760px,92vw);max-height:82vh;display:flex;flex-direction:column;
   box-shadow:0 18px 60px rgba(0,0,0,.28);border:1px solid var(--line);overflow:hidden;
 }
-.modal-box.small{width:min(460px,92vw)}
-.modal-head{display:flex;justify-content:space-between;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line);font-size:14px;font-weight:700}
+.modal-box.small{width:min(540px,94vw)}
+.modal-head{display:flex;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line);font-size:15px;font-weight:700}
 .modal-foot{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-top:1px solid var(--line)}
 .hint{font-size:11px;color:var(--muted)}
 .modal-foot .hint{flex:1 1 auto;min-width:0}
@@ -170,12 +170,12 @@ body.hide-toc .toc{margin-right:-280px}
 .browse-list{flex:1 1 auto;overflow-y:auto;padding:8px 12px;min-height:220px}
 .browse-row{padding:7px 9px;border-radius:7px;font-size:13px;cursor:pointer;display:flex;gap:8px;align-items:center}
 .browse-row:hover{background:var(--hover)}
-.settings-body{padding:12px 16px;display:flex;flex-direction:column;gap:12px;overflow-y:auto}
-.settings-body .row{display:grid;grid-template-columns:78px 1fr 46px;align-items:center;gap:10px;font-size:12.5px}
+.settings-body{padding:16px 20px;display:flex;flex-direction:column;gap:15px;overflow-y:auto}
+.settings-body .row{display:grid;grid-template-columns:88px 1fr 54px;align-items:center;gap:12px;font-size:13.5px}
 .settings-body .row input[type=range]{width:100%}
-.settings-body .row b{font-size:11.5px;color:var(--muted);text-align:right;font-weight:500}
-.settings-body select{font-size:12.5px;padding:5px 8px;border-radius:7px;border:1px solid var(--line);background:var(--bg2)}
-.row-btns{display:flex;justify-content:flex-end;border-top:1px solid var(--line);padding-top:10px}
+.settings-body .row b{font-size:12.5px;color:var(--muted);text-align:right;font-weight:500}
+.settings-body select{font-size:13.5px;padding:6px 9px;border-radius:7px;border:1px solid var(--line);background:var(--bg2)}
+.row-btns{display:flex;justify-content:flex-end;border-top:1px solid var(--line);padding-top:12px}
 
 /* scrollbars */
 ::-webkit-scrollbar{width:9px;height:9px}
@@ -187,6 +187,10 @@ body.hide-toc .toc{margin-right:-280px}
 .topbar .right .vsep{width:1px;height:18px;background:var(--line);margin:0 4px}
 .icon-btn.nav-book{font-size:13px;letter-spacing:-1px;width:36px;color:var(--muted)}
 .icon-btn.nav-book:hover:not(:disabled){color:var(--accent);background:var(--hover)}
+/* 自动下一章开关：开启时高亮（与主题强调色一致），关闭时保持普通图标色。
+   与「阅读设置」里的复选框同源（state.settings.autoNext），任一处切换都会同步。 */
+.icon-btn.auto-next-btn.on{color:var(--accent);background:var(--hover)}
+.icon-btn.auto-next-btn.on:hover{filter:brightness(1.08)}
 .icon-btn:disabled{opacity:.3;cursor:default;background:none!important;color:var(--muted)!important}
 .nav-btn.wide{font-size:12px;padding:6px 10px}
 .book-item .bs .author{color:var(--accent);opacity:.85}
@@ -297,21 +301,56 @@ body.immersive .quick-nav:hover{opacity:1}
 
 /* ---------- 自定义字体块（与设置里其他行统一字号） ---------- */
 .font-block{border-top:1px solid var(--line);padding-top:10px;display:flex;flex-direction:column;gap:8px}
-.font-head{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:12.5px}
-.settings-body .ghost-btn{font-size:12.5px}
+.font-head{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:13.5px}
+/* ---------- 字体选择器（自定义控件，替代原生 <select>） ----------
+   为什么要自定义：原生 <option> 无法逐项指定 font-family（Windows 上多数浏览器
+   忽略 option 的字体），也塞不进删除按钮。所以用一个按钮 + 浮层列表实现，
+   列表里每一项用它自己对应的字体渲染。 */
+.font-picker{width:100%}
+.font-picker .fp-btn{
+  width:100%;box-sizing:border-box;height:38px;display:flex;align-items:center;gap:8px;
+  padding:0 12px;border:1px solid var(--line);border-radius:7px;background:var(--bg2);
+  color:var(--text);font-size:13.5px;cursor:pointer;text-align:left;
+}
+.font-picker .fp-btn:hover{border-color:var(--accent)}
+.font-picker .fp-cur{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.font-picker .fp-caret{flex:0 0 auto;color:var(--muted);font-size:12px}
+/* 菜单挂在 body 下、position:fixed，位置由 JS 按按钮矩形算。
+   为什么不用 absolute：.modal-box（overflow:hidden）与 .settings-body（overflow-y:auto）
+   会把它裁掉半截 —— 字体块正好在设置面板最后一行。 */
+.fp-menu{
+  position:fixed;z-index:200;min-width:160px;
+  /* 预设最大高度：字体再多也只占这么高，超出部分滚动查看。
+     数值与 app.js 的 FP_MENU_MAX_H 保持一致（JS 在定位时还会按可用空间收窄）。 */
+  max-height:min(260px,50vh);overflow-y:auto;padding:4px;
+  overscroll-behavior:contain;
+  border:1px solid var(--line);border-radius:8px;background:var(--panel);
+  box-shadow:0 10px 28px rgba(0,0,0,.22);
+}
+.fp-menu.hidden{display:none}
+/* 内置字体与自定义字体之间的分隔线。列表长了以后，没有分隔容易分不清哪几项可删。 */
+.fp-sep{height:1px;margin:4px 6px;background:var(--line)}
+.fp-menu .fp-item{
+  display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;
+  padding:8px 10px;border-radius:6px;font-size:13.5px;color:var(--text);
+  cursor:pointer;background:transparent;border:0;text-align:left;
+}
+.fp-menu .fp-item:hover{background:var(--hover)}
+.fp-menu .fp-item.on{background:var(--accent-soft);color:var(--accent)}
+.fp-menu .fp-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fp-menu .fp-del{
+  flex:0 0 auto;width:20px;height:20px;line-height:1;display:flex;align-items:center;justify-content:center;
+  border:0;border-radius:50%;background:transparent;color:var(--muted);font-size:13px;cursor:pointer;
+}
+.fp-menu .fp-del:hover{background:rgba(217,83,79,.14);color:#d9534f}
+.settings-body .ghost-btn{font-size:13.5px;padding:7px 14px}
 
 /* ---------- 书源并发数（worker 池） ---------- */
 .pool-block{border-top:1px solid var(--line);padding-top:10px}
-.pool-hint{font-size:11px;color:var(--muted);line-height:1.6;margin-top:-6px}
-.font-list{display:flex;flex-direction:column;gap:6px;max-height:190px;overflow-y:auto}
-.font-empty{font-size:11.5px;color:var(--muted);padding:1px 0}
-.font-row{
-  display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:12.5px;
-  padding:5px 8px;border:1px solid var(--line);border-radius:7px;background:var(--bg2);
-}
-.font-row .fname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.font-del{font-size:11.5px;color:var(--muted);padding:2px 7px;border-radius:5px;flex:0 0 auto}
-.font-del:hover{color:#c0392b;background:var(--hover)}
+.pool-hint{font-size:12px;color:var(--muted);line-height:1.65;margin-top:-7px}
+/* 说明：原来这里还有 .font-list / .font-row / .font-del —— 那是「下拉 + 独立字体列表」
+   两块式设计的样式。现已合并成 .font-picker 一个控件（选项内嵌 ✕ 删除），
+   这些类没有引用方，已删除。 */
 
 /* ---------- 右键菜单 ---------- */
 .ctx-menu{

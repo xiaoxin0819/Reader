@@ -1,6 +1,6 @@
 # Reader 项目说明与任务状态
 
-更新时间：2026-09-21
+更新时间：2026-09-21（发现页控件 / 结果页残留 / 内置浏览器复用 / 多实例并存）
 
 ## 0. 进度速览（每完成一项就更新这里）
 
@@ -61,8 +61,423 @@
 | **代码审查 M1–M4（静态资源 / 坏目录判据 / 自愈负缓存 / URL 选项，2026-09-20）** | ✅ **本次完成（已实测）** | ① M1：两个服务的静态资源路径检查从裸前缀改为 `path.relative()` 真实包含判断，`%5c` / `%2f` 越界向量均 403；② M2：空查询参数不再一律判坏，普通 `?x=&y=1` 不触发重抓，只有 id 类参数为空或详情 URL 同参数有值才判坏；③ M3：`bookUrlHealCache` 失败负缓存加 10 分钟 TTL，站点/搜索恢复后可重试；④ M4：新增静态完整选项移植（支持 method/body），动态占位符选项拒绝搬运，纵横这类 `bookId={$.bookId}` 仍依赖精确搜索返回完整 URL。`node --check` 通过，M1 双服务实测 403/200，M2–M4 断言 8/8，书架同步回归 14/14 |
 | **本地阅读器当前版本 exe 打包（2026-09-21）** | ✅ **本次完成（已自检）** | 旧 SEA 打包脚本与新 `server.mjs` 的 `replaceManyWithRule` 导入和加固后的 `serveStatic()` 不匹配，已同步适配。重新执行 `node build/build-exe.mjs` 成功（含图标与版本信息），产物 `阅读器/dist/LocalReader.exe`，94,125,568 bytes，SHA256 `051DE2CEDCE03F63B83C2A51C5FB40F1977C370A5B3AE542B5316422C9A2E088`；打包脚本 `node --check` 通过，脚本内置 exe 自检 `/api/state` 响应正常。 |
 | **远距离跳章 + 速读谷风控回退（2026-09-20）** | ✅ **代码修复完成，待速读谷解封后用户实测** | 保留「直接换章」与冷章节 100ms loading；回退第一版新增的目录悬停 / 按下任意章预取（该行为放大请求量，触发速读谷风控），恢复 legado 同款「当前章 + 前后一章」策略。请求成功后才更新章节状态，pending Promise 不再被误判为已缓存，`AggregateError` 转成可读提示；速读谷 / 速读谷² 统一 `concurrentRate=1/2000` 且禁止导出 TXT，并修复多 worker 下限速记录不共享的问题（同一限速书源固定 worker，对齐 legado 进程级限速）；`noExport` 站点不再参与启动 / 清缓存后的后台预热，避免当前封禁期继续打真实站点。专项回归 **5/5 PASS**（含 hover 不发请求、pending 有 loading、失败保留旧章）；书架 / 正文同步回归改选非速读谷书源后 **14/14 PASS**；限速纯本地实测第 2/3 次间隔 2010/2015ms，worker 固定映射断言通过。当前 IP 被速读谷临时封禁，不继续请求真实站点。 |
+| **发现页下拉控件全部生效（2026-09-21）** | ✅ **本次完成（已实测）** | 七猫「选择分组 / 性别 / 分类 / 字数 / 状态 / 排序」逐个实测。修了两处真 bug：① `explore.mjs` 的 `.good` 兜底按「url 数多者胜」比较，而「排行榜」只有 20 项、「动态分类」有 200+ 项，切到小分组时被旧缓存挡住 → 改成「只有新结果一个内容入口都没有（源站 502）才算退化」；② 前端 `runExploreAction` 只更新 infoMap 不重绘分类 → 改成刷新后整块重绘。回归 **18/18 PASS**。已知例外 3 个：「动态分类」下的「字数 / 状态 / 排序」是书源脚本自身未读取对应变量（`dynamicWords`/`dynamicOver`/`dynamicSort` 出现 0 次），非阅读器问题。 |
+| **发现结果页残留旧内容 + loading 不消失（2026-09-21）** | ✅ **本次完成（已实测）** | 现象：换分类时标题已更新、列表还挂着上一次的书（如标题「科幻末世」列表仍是《凡骨》），且「正在加载…」不消失。根因：`loadExploreBooks` 为「翻页不闪」保留旧列表，但换分类时也保留了；且丢弃过期请求（`seq !== exploreSeq`）时直接 return，没隐藏 `#expLoading`。修法：按「标题或 URL 变化」判定换内容源并立即清空 + 显示加载中；丢弃过期请求时同步收掉 loading。实测切换后 `earlyRows=0`、显示「加载中…」，2 秒内渲染新列表。 |
+| **内置浏览器「打开失败：exit 0」（2026-09-21）** | ✅ **本次完成（已实测）** | 根因：Edge 对同一个 `user-data-dir` 是单实例的。已有 Edge 占着该 profile 时，新起的 Edge 会把启动请求转交给已有实例后**以 exit 0 正常退出**，既不写 `DevToolsActivePort` 也不监听端口；旧代码启动前又先删掉了该文件，于是必然抛「浏览器进程启动即退出（exit 0）」。触发条件：同一数据目录被两个 Reader 进程共用（源码版 + exe、或测试进程残留）。修法：启动前先读 `DevToolsActivePort` 并探测 `/json/version`，活着就直接接管复用。回归 **6/6 PASS**；真实 UI 点「用户后台」实测窗口打开、canvas 渲染正常、无报错。 |
+| **支持同时开多个 Reader 实例（2026-09-21）** | ✅ **本次完成（已实测）** | 规则：数据目录（`cacheDir`）不同 = 不同实例可并存；相同 = 重复启动会被识别为「已在运行」并退出。修了拦路 bug：`/api/instance` 只返回 `dataDir`（程序目录），而用户用不同 `READER_CACHE_DIR` 开两份时两个进程的 `dataDir` 都是 `Reader` → 第二个被误判成「已在运行」直接退出。修法：接口新增 `cacheDir` 字段，「是否同一实例」判定改用 `cacheDir`（保留旧版按 `dataDir` 的兼容回退）。回归 **8/8 PASS**。 |
+| **发现页书列表缓存 + 发现页固定 worker（2026-09-21）** | ✅ **本次完成（已实测）** | ① 发现页的**分类**有 ACache 兜着，但点进去的**书列表完全没有缓存** —— 实测同一个框连点 4 次 3469/3004/2500/1668ms，每次都重新打源站。新增 `EXPLORE_BOOKS_DIR` 落盘缓存，key = 书源+URL+页码+**infoMap 指纹**（规则型书源的筛选条件不在 URL 里，不带指纹会串味），TTL **5 分钟**（方案 B）；`refresh=1` 强制回源。实测端到端：玄幻 2945→**110ms**、巅峰榜 1417→**110ms**、养肥 1304→**106ms**。② 发现页任务按书源固定 worker（`exploreSlotIndex`）：`exploreKindsMap` / `exploreInfoMapList` 是 worker 内模块级状态，且每个 worker 有独立 TLS 连接池，请求散在 4 个 worker 上等于每次都在冷连接上重新握手。③ 源站 5xx 时加 **60 秒负缓存**，避免用户反复干等 Cloudflare 的 20 秒源站超时；只对网络层失败记录，成功但为空不记。④ 新缓存接入「清理缓存」与 `/api/online/storage` 统计。 |
+| **发现页缓存改为 stale-while-revalidate + 后台预热（2026-09-21）** | ✅ **本次完成（已实测）** | ① **不再有「过期要重新等」**：5 分钟新鲜期内直接返回；超期后先返回旧数据（`stale=true`）再后台悄悄重抓，用户永远秒开；超过 24 小时才真的重新等。② 新增**发现页后台预热**，只预热用户指定的「排行榜 + 热门标签」两组共 **34 项**（`PREWARM_GROUPS`）：严格串行 + 每项间隔 1 秒（`PREWARM_GAP_MS`），已缓存的项直接跳过；一轮跑完即停，不做定时轮询。实测一轮 **118 秒**（34 项固定间隔 34s + 实际抓取 84s），跑完这 34 项 **10/10 命中缓存、7-19ms**。③ 预热**避开用户点击会用的 worker**（`BookPool.pickIdleSlot(excludeIndex)`）：worker 任务是同步阻塞的，预热若占用固定 worker 会让用户排队；缓存写在主进程，所以预热在哪个 worker 抓都能命中。没有空闲 worker 就跳过该项（用户优先）。④ 预热进度写进 **`/api/online/pool` 的 `prewarm` 字段**（`explorePrewarmStatus()`：source/sourceName/total/done/skipped/failed/processed/percent/current/elapsedMs/etaMs），前端「抓取池状态」按钮直接显示。⑤ 实测隔离性：5 分钟内新增的 45 个缓存文件**全部属于光遇聚合**，其它书源零影响。 |
+| **三处预热统一进度 + ⚡ 实时进度条（2026-09-21）** | ✅ **本次完成（已实测）** | ① 新增统一的 `prewarmTasks` 注册表（`prewarmBegin` / `prewarmEnd` / `prewarmStatus`），把**三处预热**全部纳入：`reading`（最近阅读正文）、`shelf`（书架正文）、`explore`（发现页分类）。此前只有发现页有进度，书架和最近阅读只打一行日志。② `/api/online/pool` 的 `prewarm` 改为返回统一结构（id/kind/label/total/done/skipped/failed/processed/percent/current/startedAt/elapsedMs/finished/etaMs），在跑的排前面。③ 完成**不立刻删**，保留 8 秒尾巴（`prewarmEnd` 里 `setTimeout`）：预热常常几秒就跑完（书架全部命中缓存时约 1 秒），立刻删会让用户以为「什么都没发生」；留尾巴让进度条能走到 100%。④ 前端 ⚡ 按钮从「静态文本框」改为**实时进度条面板**：进度条 + 百分比 + 已抓/已缓存/失败 + 当前项 + 已用/预计剩余，**1 秒自动轮询**，不需要用户手动点；全部结束后多刷 2 次再停轮询，关掉即停。⑤ 实测：打开发现页 → 点 ⚡ → 进度条从 **0% 自动走到 3%**（无需手动刷新）；启动瞬间三处状态都能看到（`书架正文 13/13(完成) | 最近阅读 斗破苍穹 2/2(完成)`），8 秒后自动清空。回归：API 冒烟 13/13、缓存与固定 worker 6/6、失败判定 9/9、预热选取 4/4、SWR 4/4 全通过。 |
+| **清缓存后自动重跑全部预热（2026-09-21）** | ✅ **本次完成（已实测）** | 用户指出「清缓存肯定得重新跑」。原实现只重跑正文（最近阅读 + 书架），**发现页的 34 项没有重新预热**，且存在一个隐蔽 bug：`prewarmTasks.has(id)` 会把「刚跑完、还在 8 秒展示尾巴里」的任务误判成「正在跑」，导致清缓存后的新一轮被直接跳过。修法：① 新增 `prewarmRunning(id)`（只看 `finishedAt`，不含尾巴）与 `prewarmDrop(id)`，`warmExploreKinds` 的判重改用前者，清缓存前对每个待重跑书源调用后者；② 新增 `recentExploreSources`（最近 10 分钟内打开过发现页的书源，最多 5 个），打开发现页时 `rememberExploreSource()` 记录，清缓存时据此重跑；③ 清缓存后按「最近阅读 → 书架 → 发现页」**依次**重跑（`setImmediate` + 链式 `finally`，避免两拨请求同时压源站）；④ 前端提示改为「正在后台重新预热（点 ⚡ 看进度）」。**实测**：清缓存返回 125ms（释放 29.8MB），随后自动依次跑完 `reading 2/2` → `shelf 13/13` → `explore 34/34`，**3/3 PASS**；SWR 自包含回归 **4/4 PASS**。 |
+| **发现页预热提速：1 项/秒 → 目标 5 项/秒（2026-09-21）** | ✅ **本次完成（已实测）** | 用户要求「改成 5 项一秒先看看」。① 调度从「严格串行 + 固定 1 秒间隔」改为**按目标速率派发 + 受 worker 数约束的并发**：新增 `PREWARM_RATE_PER_SEC = 5`、`PREWARM_GAP_MS = 1000/5 = 200ms`、`maxInFlight = pool.size - 1`（永远留一个 worker 给用户点击）。用「在飞集合 + `Promise.race`」而不是 `Promise.all` —— 后者会把 34 项一次性全排进 worker 队列，等于绕过限速。② 拿不到空闲 worker 时**等待重试**（`PREWARM_SLOT_WAIT_MS = 5000`）而不是直接记失败：并发时「同批其它项占着 worker」是常态，立刻判失败会让进度条显示一堆假失败。③ `etaMs` 在样本 < 3 项时按 1 项/秒保守估计（并发下按 5 项/秒估会给用户「马上就好」的错觉）。**实测**：清缓存后 34 项仅用 **8.1 秒**（原 118 秒），实际吞吐 **4.19 项/秒**、失败 0。④ 关键安全性实测：预热期间连续点同一个框 10 次，首次 3200ms（缓存被清后回源，正常），**其余 9 次全部 17-19ms** —— 用户点击没有被并发预热拖慢。⑤ 说明：真实吞吐上限 = 可用 worker 数 / 单项耗时（4 worker ≈ 1.3 项/秒）；实测能到 4.19 项/秒，是因为多项命中了缓存（`已缓存 27`）而不需要占用 worker。把书源并发数调大后，吞吐会自然涨到该上限。 |
+| **阅读设置面板：并发数移到版心宽度下方（2026-09-21）** | ✅ **本次完成（已实测）** | 用户要求把「书源并发数」从设置面板底部移到**版心宽度下面、字体上面**。改动只在 `public/index.html`：把 `<div class="row pool-block only-online">` + 提示块整段上移（11 行挪位，逻辑零改动，`setPoolSize` / `vPoolSize` / `poolHint` 的 id 与 `app.js` 里的绑定全部不变）。该行带 `only-online` 类，本地模式仍自动隐藏（符合原有设计）。**实测**（真实浏览器，在线模式）：可见设置项顺序为「字号 → 行距 → 首行缩进 → 字距 → **版心宽度 → 书源并发数 → 字体** → 自动下一章」，`版心宽度=4 / 并发数=5 / 字体=6` 三项断言全通过；控件值正常显示（4）。回归：API 冒烟 13/13。 |
+| **顶栏「自动下一章」按钮 + 顶栏导航改为翻章（2026-09-21）** | ✅ **本次完成（已实测）** | ① 新增顶栏按钮 `#btnAutoNext`（图标 `⏭`，开启时高亮），把「阅读设置」里的自动下一章开关提出来一键切换；与设置面板复选框**双向同步**（新增 `setAutoNext(on)` 统一入口，两处都走它，避免出现「顶栏显示已开、设置里没勾」的矛盾）。② 顶栏 `#btnPrevBook` / `#btnNextBook` 从「上一本 / 下一本」（`stepBook`）改为**翻章**（`gotoChapter`）：原来它们与底部同名按钮语义冲突（顶栏翻书、底部翻章），很容易误点；现在统一成翻章，翻整本保留在底部 `#btnPrev` / `#btnNext`。没打开书时仍退回翻书（保住「先选一本开始读」）。③ `updateBookNav()` 相应拆分禁用判据：顶栏按**章**（`state.book.chapterCount` / `state.chapterIdx`）、底部按**本**，不再共用一个 `disPrev`。④ 顺手删掉 tooltip 里不存在的「Alt+←/→」提示（主界面没绑这个快捷键，只有内置浏览器窗口的 Alt+← 是后退，写了会误导）。**实测**：9/9 通过（按钮存在 / tooltip 正确 / 点击翻转 / 与 state 一致 / 复选框同步 / 反向同步 / 恢复原状）；真实翻章 **3/3**（打开《超神机械师》1483 章，点顶栏下一章 `1 → 2`、点上一章 `2 → 1`，按钮可用）。回归：API 冒烟 13/13、控制台无错误。 |
+| **顶栏翻章按钮补上快捷键标注（2026-09-22）** | ✅ **本次完成（已实测）** | 用户指出「顶层的上一章下一章按钮把快捷键的标注写出来啊」。核查后确认：**快捷键确实存在**，是我上一轮判断错了 —— `app.js` 末尾 keydown 处理器里 `←` / `→` / `PageUp` / `PageDown` 都是翻章（`gotoChapter`），而 `Alt+←/→` 才是翻整本（`stepBook`）。我上一轮只看到 Alt 那两条，误以为「主界面没绑方向键」就把标注删了。修法：tooltip 改为 **「上一章（← / PageUp）」/「下一章（→ / PageDown）」**，HTML 初始 title 与 `updateBookNav()` 里的动态 title 两处同步；并在注释里写明「tooltip 的快捷键必须与 keydown 处理器一致，Alt+←/→ 是翻整本不要写进来」。**实测**（真实浏览器，跳到第 5 章保证前后都有章）：两个 tooltip 均带快捷键标注、`→` 真的翻章 `4→5`、`←` 真的翻回 `5→4`，**5/5 PASS**；边界（第 1 章时禁用并提示「已是第一章」）**3/3 PASS**。回归：自动下一章同步 9/9、API 冒烟 13/13、控制台无错误。 |
+| **替换净化面板重复 id 修复 + 设置面板移除自动下一章（2026-09-22）** | ✅ **本次完成（已实测）** | ① **重复 id 是根因**：`sourceGroupSelect` / `srcGroupCreate` / `srcGroupRename` / `srcGroupDelete` / `sourceGroupStat` 这 5 个 id 在 HTML 里**各出现 3 次**（书源管理 269、替换净化 510、TXT 目录规则 537）。`$()` 只返回第一个，所以后两处的下拉与三个按钮**全是死的**；同时 `.src-groupbar` 在 `.replace-pane`（flex 列）里没有收缩保护，实测高度被压到 **49px（内容需约 70px）**，下拉框压扁、按钮换行后被挤出可视区 —— 就是用户看到的「书源组那行跑到下面看不见了」。修法：替换净化与 TXT 目录规则管的是**规则**、与书源组无关，直接把这两处多余的行删掉（书源组只保留在书源管理页），并在 CSS 加 `.replace-pane > .src-groupbar/.src-toolbar/.src-listbar{flex:0 0 auto}` 防止复发。② 按用户要求删除「阅读设置」里的「自动下一章」行（功能已在顶栏 `#btnAutoNext`），`state.settings.autoNext` 仍是唯一状态源。**实测**：重复 id 全部归 1、替换净化工具条 5 个按钮完整可见（top=176 h=74，未被挤出）、书源管理页三个按钮 `onclick` 均正常绑定且下拉有 2 个选项、设置面板行变为「字号/行距/首行缩进/字距/版心宽度/书源并发数/字体」（无自动下一章），**11/11 PASS**；自动下一章顶栏按钮 **8/8 PASS**；控制台无错误。 |
+| **书源「防封禁」总开关 + 并发闸门 + 字体选择器重做（2026-09-22）** | ✅ **本次完成（已实测）** | ① **「限制该书源（防封禁）」总开关**：原来「防封禁」拆成三个字段（`noExport` / `noShelfWarm` / 并发），只有第一个有界面，另两个只能改 JSON。现合并为一个复选框，tooltip 说明三件事，勾选/取消时**三个一起生效或一起清掉**（后端 `/api/sources/update` 按 `limited` 自动展开成 `noExport` / `noShelfWarm` / `concurrencyLimit=3`，避免前后端各写一套规则）。启动时自动迁移老数据（实测把速读谷 2 个源迁移到 `limited=true` + 并发 3）。② **书源级并发闸门**：新增 `sourceConcurrencyLimit()` 与 `BookPool._acquire/_release`，同一书源同时最多 N 个请求在飞，多出的排队；`request()` 与 `runAndSync()` 都走闸门，未限制的书源零开销。实测 8 个并发任务同时在飞**不超过 3**、且确实用满 3（没有过度串行）。③ **字体选择器重做**：删除「字体」row + 独立的「自定义字体」列表，合并成一个自定义控件（按钮 + 浮层菜单）——每个选项用**自己对应的字体**渲染（原生 `<option>` 在 Windows 上普遍忽略 font-family），自定义项右侧带 ✕ 可删、内置项不可删。④ **修复下拉被裁半截**：菜单原本 `position:absolute` 在 `.font-picker` 里，被 `.modal-box`（`overflow:hidden`）与 `.settings-body`（`overflow-y:auto`）两层裁掉；改为挂在 body 下 + `position:fixed`，JS 按按钮矩形定位，下方空间不足时自动向上翻，并跟随面板滚动/窗口缩放。⑤ **阅读设置面板整体放大**：宽度 460→**540**、内边距 12/16→16/20、行字号 12.5→13.5、字体按钮高 32→38、菜单项 6/8→8/10。**实测**：限制开关双向 6/6、并发闸门 3/3、字体选择器 14/14、下拉不裁（4 种窗口尺寸）12/12、✕ 不冒泡 2/2、放大后面板 6/6；回归 API 冒烟 13/13、控制台无错误。 |
+| **字体菜单加最大高度 + 滚动（2026-09-22）** | ✅ **本次完成（已实测）** | 用户问「导入字体过多，菜单会不会变得特别长？应该预设最大高度 + 滚动条」。核查发现 CSS 里原本已有 `max-height:min(240px,50vh)` 且实测生效（5/15/30/60 个字体菜单都锁在 240px、内容超出即出滚动条），但有三处可以做得更好，已一并完善：① 上限提到 **260px** 并抽成单一常量 `FP_MENU_MAX_H`（app.js 与 style.css 注释互相指认，避免两处数字漂移）；② 新增 `.fp-sep` **分隔线**，把「内置字体」与「自定义字体」分开 —— 列表长了以后能一眼看出哪几项带 ✕ 可删；③ 新增 `revealCurrentFontItem()`：打开菜单时用 `scrollIntoView({block:'nearest'})` 把**当前选中的字体**滚进可视区，字体多到几十个时不用自己往下翻找；④ 加 `overscroll-behavior:contain`，滚到菜单底部不会穿透去滚底下的设置面板。**实测**（注入 40 个字体，共 44 项）：菜单高 **260px**（未超上限）、内容高 1587px、`overflow-y:auto` 出滚动条、菜单不超视口（bottom=849 / vh=905）、分隔线位置正确（在 `hei` 与第一个自定义之间）、打开时自动滚到 `custom:fk34` 且该高亮项在可视区内（scrollTop=1145）、`overscroll-behavior-y=contain`，**7/7 PASS**；回归字体选择器 14/14、下拉不裁 12/12、面板放大 6/6、API 冒烟 13/13、控制台无错误。 |
+| **「限制该书源」tooltip 精简（2026-09-22）** | ✅ **本次完成（已实测）** | 用户反馈「右键鼠标点击提示框里面内容太长了」。原 tooltip 是三段完整解释（勾选后该书源会：① 禁止导出 TXT（整本导出=连续几百次请求）；② 禁止后台批量预热（启动 / 清缓存后不再预抓书架里的书）；③ 限制并发（同一书源同时最多 3 个请求，避免触发站点风控））。按用户要求精简为 **「禁止导出 / 预热 / 并发」**（14 字），只列三件事的名字，详细解释留在项目文档里。复选框文案「限制该书源（防封禁）」不变。**实测**：tooltip 文案与预期完全一致、长度 14 字、三件事的名字都在、复选框文案未变，**4/4 PASS**；回归限制开关双向 6/6、并发闸门 3/3、API 冒烟 13/13、控制台无错误。 |
 
 ### 更新日志
+- **2026-09-21（事故记录）**：调试期间误删 `node_modules`，已重装恢复。
+  - 经过：为做「改动前 vs 改动后」对照实验，用 `git worktree add ../Reader-head` 建了一个
+    HEAD 版本的副本；为了省空间，用 **目录联接（junction）** 把副本的 `node_modules`
+    指向主目录的 `node_modules`。实验结束后执行 `git worktree remove --force`，
+    Git 跟着联接把**真实目录** `Reader/node_modules` 一起删掉了。
+  - 影响：服务无法启动（`ERR_MODULE_NOT_FOUND: Cannot find package 'iconv-lite'`）。
+    **源码、书源、缓存、登录态、reader.config.json 均未受影响**（已逐项核对：
+    `src/` 38 个文件、`public/` 6、`tools/` 14、`sources/` 8、`cache/` 576、`dist/` 286 都在；
+    `git status` 无删除记录）。
+  - 恢复：`npm install --no-audit --no-fund` 重装，25 个包；16 个依赖逐个 `import` 验证全部通过。
+  - 教训：**不要用 junction / symlink 跨 worktree 共享 `node_modules`**。
+    `git worktree remove` 会跟随联接删除目标。以后对照实验要么独立 `npm install`，
+    要么用 `git stash` / 临时分支，不碰目录联接。
+
+- **2026-09-21**：修复发现页下拉不生效、结果页残留旧内容、内置浏览器 exit 0，并支持同时开多个实例。
+
+  #### 0. 发现页书列表缓存 + 固定 worker（本轮）
+  - 现象：光遇的榜单/标签「没点过的要 5s+，点过的 1-2s」；书架入口有时打不开。
+  - 排查：① 源站 `v2.gyks.cf` / `v3.gyks.cf` 曾被 FlClash 以 Fake-IP（`198.18.0.45`）接管，
+    链路本身会抖动（实测单次 1.4s ~ 43s），这部分不是代码能解决的；
+    ② 但代码侧确实有两个真问题 —— **书列表完全没有缓存**，以及**发现页请求散在 4 个 worker 上**。
+  - 改动 1（`server.mjs`）：新增 `EXPLORE_BOOKS_DIR` + `readExploreBooksCache` /
+    `writeExploreBooksCache` / `dropExploreBooksCache` / `clearExploreBooksCache`。
+    key = `md5(书源|URL|page|infoMap)`，TTL 5 分钟。**带 infoMap 指纹是必须的**：
+    规则型书源的筛选条件不出现在 URL 里，只按 URL 缓存会让「玄幻+不限」和「玄幻+50万字以上」互相串味。
+    只缓存成功且非空的结果，源站故障不落盘。
+  - 改动 2（`src/book-pool.mjs`）：新增 `exploreSlotIndex()` 与 `EXPLORE_TYPES`，
+    发现页任务按书源固定 worker。原因：`exploreKindsMap` / `exploreInfoMapList` 是 worker 内
+    模块级状态（legado 里是进程内单例），且每个 worker 有自己的 `http(s).Agent` 连接池 ——
+    请求散在 4 个 worker 上等于每次都在冷连接上重新握手。
+  - 改动 3（`server.mjs`）：新增 60 秒**失败负缓存**（`exploreFailMem`）。
+    源站挂在 Cloudflare 后面时，宕机不会立刻报错，而是等 CF 自己的源站超时（实测约 20s）
+    才回 522；用户再点一次还是 20s。负缓存让窗口内重复点击秒回提示。
+    只对 5xx / 连不上记录，「成功但为空」不记（可能是正常空分类）。
+  - 改动 4：新缓存接入 `POST /api/online/cache/clear` 与 `GET /api/online/storage`；
+    「刷新发现」时顺带 `dropExploreBooksCache`，否则分类刷新了、点进去还是旧列表。
+  - 实测（真实浏览器端到端，第 1 次回源 → 第 2 次命中缓存）：
+    玄幻 2945→**110ms**、巅峰榜 1417→**110ms**、养肥 1304→**106ms**；
+    纯接口层：3969ms → **3ms / 13ms**。
+  - 回归：`node --check` 三个文件通过；`tools/regress/verify-api-smoke.mjs` **13/13 PASS**。
+
+  #### 0b. 缓存改为 stale-while-revalidate + 后台预热 + 进度上报（本轮追加）
+  - 起因（用户提问）：「5 分钟之后我再去发现页找书，是不是又要重新等好久？」
+    以及「几百个子项，是不是要我一个个点开才会有缓存？」
+  - 改动 1（`server.mjs`，SWR）：`readExploreBooksCache` 改为返回 `{rec, stale}`。
+    新鲜期（5 分钟）内直接返回；超期则**先返回旧数据**并把 `stale` 标出来，
+    同时 `revalidateExploreBooks()` 在后台重抓。超过 `EXPLORE_BOOKS_MAX_AGE`（24h）
+    才彻底不认。后台重抓用 `exploreBooksRevalidating` 去重，连点不会打出多个请求。
+    **效果：用户不会再因为「缓存过期」而重新等待。**
+  - 改动 2（`server.mjs`，后台预热）：新增 `warmExploreKinds()` / `pickPrewarmKinds()` /
+    `exploreKindIsSectionHead()`。只预热 `PREWARM_GROUPS = ['排行榜', '热门标签']` 两组。
+    分组识别用「整行分组头」（`style.layout_flexBasisPercent >= 1`），
+    后面跟的普通 chip 即属于该组；`PREWARM_MAX_ITEMS = 60` 做硬上限。
+    实测选中 **34 项**，与独立计算的分组归属完全一致（4/4 PASS）。
+  - 改动 3（`src/book-pool.mjs`，让路）：新增 `BookPool.pickIdleSlot(excludeIndex)`。
+    发现页请求按书源固定 worker，而 worker 任务是同步阻塞的 —— 预热若占用那个 worker，
+    用户点击就得排队。改为挑「空闲且不是固定 worker」的 worker 去抓；
+    缓存写在主进程（`exploreBooksMem` / `EXPLORE_BOOKS_DIR`），所以预热在哪个 worker 抓
+    都能让用户命中。没有空闲 worker 就跳过该项（用户优先）。
+  - 改动 4（进度上报）：`explorePrewarming` 从 `Set` 改为 `Map<sourceKey, progress>`，
+    新增 `explorePrewarmStatus()` 输出 source / sourceName / total / done / skipped /
+    failed / processed / percent / current / elapsedMs / etaMs。
+    `GET /api/online/pool` 新增 `prewarm` 数组字段（空闲时为空数组）。
+    ETA 在样本少于 3 项时用固定间隔保守估计，避免「只处理 1 项就外推出剩余 0 秒」。
+  - 改动 5（前端 `public/online.js`）：「抓取池状态」弹窗显示预热进度
+    （进度百分比、已抓/已缓存/失败、当前项、已用时间、预计剩余）。
+  - 实测：
+    - SWR：把缓存改成 6 分钟前 → 请求 **7ms** 返回旧数据且 `stale=true`；
+      8 秒后后台刷新完成 → `stale=false`（4/4 PASS）。
+    - 预热：一轮 **118 秒**（34 项，间隔中位 3.0s、最大 22.4s，扣除 1s 固定间隔后
+      平均抓取 2.3s）。跑完后这 34 项 **10/10 命中缓存、7-19ms**；
+      日志 `发现页预热完成（🔅光遇聚合(26.8.16)）：新抓 21，已缓存 13，失败 0`。
+    - 让路：预热进行中用户点「玄幻」**7ms** 返回（未被预热阻塞）。
+    - 进度接口：10/10 字段断言 PASS；跑完 `prewarm` 自动变回空数组。
+    - 隔离性：最近 5 分钟新增的 45 个缓存文件**全部属于光遇聚合**，其它书源零影响。
+  - 回归：`verify-api-smoke` 13/13、缓存与固定 worker 6/6、失败判定 9/9、
+    预热选取 4/4、SWR 4/4 全通过。
+
+  #### 0c. 三处预热统一进度 + ⚡ 实时进度条（本轮追加）
+  - 用户要求：① 进度要**实时显示**、给进度条，不要每次都手动点 ⚡；
+    ② **书架也要预热**（此前只有发现页有进度）；③ 所有预热都放进 ⚡ 里。
+  - 改动 1（`server.mjs`，统一注册表）：把原先只服务发现页的 `explorePrewarming`
+    提升为通用的 `prewarmTasks`，新增 `prewarmBegin(id, {kind,label,total})` /
+    `prewarmEnd(task)` / `prewarmStatus()`。三处预热各自登记：
+      · `reading` —— 最近阅读的当前章前后各 1 章（进度以「章」为单位）
+      · `shelf`   —— 书架每本的当前章前后各 1 章（进度以「本」为单位）
+      · `explore` —— 发现页排行榜 + 热门标签（进度以「项」为单位）
+    为什么以不同单位：用户关心的是「还有多少东西没弄好」，
+    书架 13 本书用「本」比用「39 章」直观得多。
+  - 改动 2（完成尾巴）：`prewarmEnd` 不立刻删记录，保留 **8 秒**。
+    原因：书架预热全部命中本地缓存时约 **1 秒**就跑完，前端 1 秒轮询可能完全
+    看不到这条记录，用户会以为「什么都没发生」。留尾巴让进度条能走到 100%。
+  - 改动 3（`prewarmStatus`）：在跑的排前面，其余按开始时间倒序；
+    `percent` 封顶 100；`etaMs` 在样本 < 3 项时用固定间隔保守估计
+    （只处理 1 项就外推会得出「剩余 0 秒」这种明显错的数字）。
+  - 改动 4（前端 `public/online.js` + `online.css`）：⚡ 按钮从 `askText` 静态文本
+    改为 `openPrewarmPanel()` **实时进度条面板**：
+    进度条 + 百分比 + 已抓/已缓存/失败 + 当前项 + 已用/预计剩余；
+    **1 秒自动轮询**，无需手动点；全部结束后多刷 2 次（等后端尾巴）再停轮询；
+    关闭即停（`stopped` 标志 + `clearInterval`）；面板顶部仍显示抓取池
+    worker 数 / 正在忙 / 启用书源。新增 CSS `.pw-box` / `.pw-item` / `.pw-bar` /
+    `.pw-fill`（完成变绿、全失败变红）。
+  - 实测：
+    - 打开发现页 → 点 ⚡ → 进度条 **0% → 3% 自动刷新**（未手动点任何东西）。
+    - 启动瞬间三处状态都能看到：`书架正文 13/13(完成) | 最近阅读 斗破苍穹 2/2(完成)`，
+      8 秒后自动清空。
+    - `recent` 预热的 `skipped: 2` 说明已缓存的章被正确跳过（没有重复打源站）。
+  - 回归：`verify-api-smoke` 13/13、缓存与固定 worker 6/6、失败判定 9/9、
+    预热选取 4/4、SWR 4/4 全通过。
+
+  #### 0d. 清缓存后自动重跑全部预热（本轮追加）
+  - 用户指出：「如果我清缓存，肯定得重新跑啊」。核实后确认原实现有缺口。
+  - 问题 1（缺口）：`POST /api/online/cache/clear` 里只调了
+    `warmRecentOnlineReading()` + `warmOnlineShelfBooks()`，
+    **发现页的 34 项没有重新预热**。而这次清缓存恰好把
+    `exploreBooksMem` / `EXPLORE_BOOKS_DIR` 全删了 —— 用户再打开发现页，
+    前 34 项又得一项项等。
+  - 问题 2（隐蔽 bug）：`warmExploreKinds` 用 `prewarmTasks.has(taskId)` 判重。
+    但 `prewarmEnd` 会把完成的任务**多留 8 秒**给前端展示进度条，
+    这 8 秒内 `has()` 仍为 true —— 用户在这 8 秒内点「清缓存」，
+    新一轮预热会被误判成「已在跑」而直接跳过。
+    表现为「清了缓存，但发现页一直没重新预热」。
+  - 修法 1：新增 `prewarmRunning(id)`（只看 `finishedAt`，不含展示尾巴）
+    与 `prewarmDrop(id)`（立刻删掉记录，含尾巴）。
+    `warmExploreKinds` 判重改用 `prewarmRunning`；
+    清缓存时对每个待重跑书源先 `prewarmDrop('explore:' + key)`。
+  - 修法 2：新增 `recentExploreSources`（`sourceKey -> {infoMap, at}`，
+    保留最近 **5** 个、TTL **10 分钟**）。打开发现页时 `rememberExploreSource()`
+    记录；清缓存时 `recentExploreSourceList()` 取出还在 TTL 内、
+    且书源仍存在的那些来重跑。太久没碰的不主动打源站。
+  - 修法 3：新增 `reWarmExploreAfterClear(sourceKey, infoMap)` ——
+    分类缓存刚被清掉，所以先走一次 `exploreKinds` 拿最新分类
+    （同时写回 ACache），再交给 `warmExploreKinds` 挑两组预热。
+  - 修法 4：清缓存后的重跑顺序改为「最近阅读 → 书架 → 发现页」**依次**执行
+    （`setImmediate` + 链式 `finally`），避免两拨请求同时压源站。
+  - 修法 5：前端提示从「正在后台预热书架」改为
+    「正在后台重新预热（点 ⚡ 看进度）」。
+  - 实测：清缓存返回 **125ms**（释放 29.8MB），随后自动依次跑完
+    `reading 2/2` → `shelf 13/13` → `explore 34/34`，**3/3 PASS**。
+  - 附带：SWR 回归脚本原先依赖「缓存文件必须是旧的」这个外部状态，
+    清缓存后会误报 FAIL。改为自包含（`verify-swr4.mjs`：自己把缓存改旧 +
+    重启后验证），**4/4 PASS**。
+  - 回归：`verify-api-smoke` 13/13、缓存与固定 worker 6/6、失败判定 9/9、
+    预热选取 4/4 全通过。
+
+  #### 0e. 发现页预热提速到目标 5 项/秒（本轮追加）
+  - 用户要求：「改成 5 项一秒先看看」。
+  - 先算清物理上限（`4 worker、单项约 2.3s、留 1 个给用户`）：
+    理论吞吐 = 3 / 2.3 ≈ **1.3 项/秒**。要真到 5 项/秒需要约 13 个 worker，
+    即 13 个并发请求同时打源站 —— 正是当初把速读谷 IP 打到风控的规模。
+    所以这里的做法是：**把速率参数改成 5，但真实并发仍由 worker 数兜底**。
+  - 改动 1（`server.mjs`，参数）：新增 `PREWARM_RATE_PER_SEC = 5`，
+    `PREWARM_GAP_MS` 由固定 1000 改为 `1000 / PREWARM_RATE_PER_SEC = 200ms`。
+    注释明确写出「这是目标速率，不是实际速率；风控真正的保险是 worker 数」。
+  - 改动 2（调度模型）：从「严格串行 + 每项等 1 秒」改为
+    「按目标速率派发 + 在飞上限」：
+      · `maxInFlight = Math.max(1, pool.size - 1)` —— 永远留一个 worker 给用户点击；
+      · 用「在飞 `Set` + `Promise.race`」循环，而不是 `Promise.all`。
+        `Promise.all` 会把 34 项一次性全排进 worker 队列，等于绕过限速；
+      · 每派发一项 `await PREWARM_GAP_MS`，避免瞬间打出一串。
+  - 改动 3（避免假失败）：`fetchOne` 里拿不到空闲 worker 时**等待重试**
+    （`PREWARM_SLOT_WAIT_MS = 5000`，每 100ms 试一次），而不是立刻 `prog.failed++`。
+    并发预热时「同批其它项正占着 worker」是常态，立刻判失败会让进度条显示一堆假失败。
+    只有等满 5 秒还拿不到，才认定用户确实在占用。
+  - 改动 4（ETA）：`prewarmStatus` 里样本 < 3 项时按 **1 项/秒**保守估计，
+    不再用 `PREWARM_GAP_MS`（现在是 200ms，会低估 5 倍）。
+  - 实测（清缓存后触发）：
+    ```
+    [ 36s]  0/34   0%  已抓0  缓存0  失败0  追更榜
+    [ 40s] 13/34  38%  已抓6  缓存7  失败0  完本榜
+    [ 44s] 34/34 100%  已抓7  缓存27 失败0
+    发现页预热耗时: 8.1 秒（34 项）   实际吞吐: 4.19 项/秒
+    ```
+    对比原串行实现 **118 秒 → 8.1 秒**。
+    说明：能到 4.19 项/秒是因为 27 项命中了缓存（`已缓存 27`）而不占用 worker；
+    真需要回源的那部分仍受 worker 数限制。
+  - 关键安全性实测：预热期间连续点同一个框 10 次 →
+    `3200ms(首次回源，正常) 19 19 18 18 17 18 17 18 17ms`，
+    **其余 9 次全部 17-19ms**，用户点击没有被并发预热拖慢。
+  - 回归：`verify-api-smoke` 13/13、缓存与固定 worker 6/6、失败判定 9/9、
+    预热选取 4/4 全通过。
+
+  #### 0f. 设置面板：书源并发数移到版心宽度下方（本轮追加）
+  - 用户要求：「把书源并发数设置放到版心宽度的下面，字体的上面」。
+  - 改动（仅 `public/index.html`）：把这一段整体从「自定义字体」块之后
+    上移到「版心宽度」之后：
+    ```
+    <div class="row pool-block only-online">  书源并发数 + 滑杆 + 数值
+    <div class="hint pool-hint only-online">  调大 / 调小 的说明
+    ```
+    共 11 行挪位，**逻辑零改动** —— `setPoolSize` / `vPoolSize` / `poolHint`
+    的 id 与 `app.js` 里 `syncSettingsUI()`、`poolEl.oninput`、
+    `POST /api/online/pool` 的绑定全部不变。
+  - 该行带 `only-online` 类：本地模式下依旧自动隐藏（沿用原有设计，
+    本地阅读不需要书源并发数）。
+  - 实测（真实浏览器，切到在线模式后打开设置）：
+    ```
+    0. 字号   1. 行距   2. 首行缩进   3. 字距
+    4. 版心宽度   5. 书源并发数   6. 字体   7. 自动下一章
+    ```
+    `版心宽度=4 / 并发数=5 / 字体=6`，两项顺序断言全通过；
+    控件值正常（4），滑杆 min=1 max=16。
+  - 回归：API 冒烟 13/13。
+
+  #### 0g. 顶栏自动下一章按钮 + 顶栏导航改为翻章（本轮追加）
+  - 用户要求：① 把「阅读设置」里的自动下一章做成顶栏按钮；
+    ② 把顶栏的「上一本 / 下一本」改成「上一章 / 下一章」。
+  - 改动 1（`public/index.html`）：顶栏右侧新增
+    `<button id="btnAutoNext" class="icon-btn auto-next-btn on" title="…">⏭</button>`，
+    放在 `#btnNextBook` 之后、分隔符之前。
+  - 改动 2（`public/index.html`）：`#btnPrevBook` / `#btnNextBook`
+    文案由 `‹‹` / `››` 改为 `‹` / `›`，tooltip 由「上一本 / 下一本」改为「上一章 / 下一章」。
+  - 改动 3（`public/app.js`）：新增 `setAutoNext(on)` 作为**唯一**的开关入口 ——
+    同时更新 `state.settings.autoNext`、设置面板复选框、顶栏按钮的 `.on` 类与 tooltip，
+    最后 `saveSettings()`。设置面板的 `onchange` 与顶栏按钮的 `onclick` 都调它，
+    保证两个入口双向同步。
+  - 改动 4（`public/app.js`）：顶栏两个按钮改为翻章：
+    ```js
+    $("btnPrevBook").onclick = () => {
+      if (state.book && (Number(state.book.chapterCount) || 0) > 0) return gotoChapter(state.chapterIdx - 1);
+      stepBook(-1);   // 没打开书时保留「先选一本开始读」的行为
+    };
+    ```
+    `btnNextBook` 同理。翻整本仍可用底部 `#btnPrev` / `#btnNext`。
+  - 改动 5（`public/app.js`，`updateBookNav`）：**禁用判据拆开**。
+    顶栏按钮按「章」算（`chDisPrev = !chTotal || chIdx <= 0`），
+    底部按钮按「本」算（`disPrev = onlyOne || atFirst`）。
+    原来两者共用一个 `disPrev`，改成翻章后如果还共用，
+    会出现「书在中间章但已是最后一章，下一章按钮仍可点」这类错判。
+  - 改动 6（`public/style.css`）：新增
+    `.icon-btn.auto-next-btn.on{color:var(--accent);background:var(--hover)}`，
+    开启时用主题强调色高亮。
+  - 顺手修正：删掉 tooltip 里的「（Alt+←）/（Alt+→）」。
+    主界面并没有绑定 Alt+方向键（只有内置浏览器窗口里 Alt+← 是「后退」），
+    写了会误导用户。
+  - 实测：
+    - 开关同步 **9/9 PASS**：按钮存在、tooltip 正确、点击翻转、
+      与 `state.settings.autoNext` 一致、设置面板复选框同步、反向同步、再点恢复。
+    - 真实翻章 **3/3 PASS**：打开《超神机械师》（1483 章，当前第 1 章），
+      点顶栏「下一章」`1 → 2`，点「上一章」`2 → 1`，按钮可用（未误禁用）。
+  - 回归：`verify-api-smoke` 13/13；`verify-no-console-errors` **控制台无错误**。
+
+  #### 0h. 补回顶栏翻章按钮的快捷键标注（2026-09-22）
+  - 用户指出：「顶层的上一章下一章按钮把快捷键的标注写出来啊，之前不是写了吗」。
+  - **我上一轮的判断是错的**：我搜 `altKey` 只看到 `Alt+←/→`（那是 `stepBook` 翻整本）
+    和内置浏览器里的 `Alt+←`（后退），就下结论说「主界面没绑方向键」，
+    把 tooltip 里的标注删了。实际上 `app.js` 末尾的 keydown 处理器里：
+    ```js
+    if (e.key === "ArrowLeft"  || e.key === "PageUp")   { e.preventDefault(); gotoChapter(state.chapterIdx - 1); }
+    else if (e.key === "ArrowRight" || e.key === "PageDown") { e.preventDefault(); gotoChapter(state.chapterIdx + 1); }
+    ```
+    **`←` / `→` / `PageUp` / `PageDown` 都是翻章**，与顶栏按钮现在的语义一致。
+    所以标注本来就该有，是我不该删。
+  - 修法：tooltip 改为
+    「上一章（← / PageUp）」/「下一章（→ / PageDown）」，两处同步 ——
+    `public/index.html` 的初始 `title`（首屏立刻可见）
+    与 `public/app.js` 的 `updateBookNav()` 动态 `title`（打开书后校正、并区分边界文案）。
+  - 顺带在 `updateBookNav` 里写了注释，避免以后再搞错：
+    「tooltip 的快捷键必须与 keydown 处理器一致；`Alt+←/→` 是翻整本，不要写进翻章按钮」。
+  - 实测（真实浏览器）：
+    - 跳到第 5 章（保证前后都有章）→ 两个 tooltip 均带标注；
+      `→` 真翻章 `4→5`、`←` 真翻回 `5→4`，**5/5 PASS**。
+    - 边界：第 1 章时「上一章」禁用并提示「已是第一章」，**3/3 PASS**。
+    - 回归：自动下一章双向同步 9/9、API 冒烟 13/13、控制台无错误。
+
+  #### 0i. 替换净化重复 id 修复 + 设置面板移除自动下一章（2026-09-22）
+  - 用户反馈：① 替换净化里「书源组」那一行跑到下面看不见，而且那行的
+    新建 / 重命名 / 删除都没用；② 阅读设置里的「自动下一章」删掉（功能已移到顶栏）。
+  - **根因（真 bug）**：`sourceGroupSelect` / `srcGroupCreate` / `srcGroupRename` /
+    `srcGroupDelete` / `sourceGroupStat` 这 5 个 id 在 `public/index.html` 里
+    **各出现 3 次**：
+      · 书源管理（`#panelSources`）
+      · 替换净化（`#replacePane`）
+      · TXT 目录规则（`#txtTocPane`）
+    `$()`（`getElementById`）只返回**第一个**匹配，所以后两处的下拉与三个按钮
+    全部指向书源管理页那套 —— 在替换净化面板里点「新建」实际触发的是另一个面板的按钮，
+    表现就是「点了没用」。`renderSourceGroupBar()` 也只渲染第一个下拉，
+    后两处永远是空 `<select>`。
+  - 布局问题（同源）：`.src-groupbar` 是 flex 容器，在 `.replace-pane`（flex 列）
+    里没有 `flex: 0 0 auto` 保护，实测被压到 **49px**（内容需要约 70px），
+    下拉框被压扁、按钮换行后落到面板外 —— 就是「那一行看不见」。
+  - 修法 1：替换净化与 TXT 目录规则管的是**规则**，与「书源组」无关，
+    直接把这两处多余的 `.src-groupbar` 整段删掉（书源组只保留在书源管理页），
+    重复 id 随之消失。
+  - 修法 2：CSS 补防御性规则
+    `.replace-pane > .src-groupbar, .replace-pane > .src-toolbar, .replace-pane > .src-listbar { flex: 0 0 auto }`，
+    避免以后再加同类行时又被压扁。
+  - 修法 3：按用户要求删除阅读设置里的「自动下一章」行。
+    `state.settings.autoNext` 仍是唯一状态源，只由顶栏 `#btnAutoNext` 读写；
+    `app.js` 的 `setAutoNext()` / `syncSettingsUI()` 保留对 `#setAutoNext` 的
+    **兼容判断**（`if (an)` / `if (cb)`），旧 DOM 或旧缓存页面也不会报错。
+  - 实测（真实浏览器）：
+    - 5 个重复 id 全部归 1；替换净化面板已无多余书源组行；
+      工具条完整可见（`top=176 h=74`）；5 个按钮等宽（各 100px）。
+    - 书源管理页：下拉可见且有 2 个选项，新建/重命名/删除
+      `typeof onclick === 'function'`（确实绑定上了），未误禁用。
+    - 设置面板行变为「字号 / 行距 / 首行缩进 / 字距 / 版心宽度 / 书源并发数 / 字体」，
+      无「自动下一章」；顶栏 `#btnAutoNext` 仍在且状态与 `state.settings.autoNext` 一致。
+    - **11/11 PASS**；自动下一章顶栏按钮 **8/8 PASS**；控制台无错误。
+  - 回归：`verify-api-smoke` 13/13、`verify-no-console-errors` 无错误、
+    `verify-hotkey` 5/5、`verify-nav-chapter` 3/3。
+
+  #### 1. 七猫发现页下拉按钮不生效（真 bug）
+  - 现象：切换「选择分组 / 性别 / 分类 / 字数 / 状态 / 排序」后，下拉框的值变了，但下面的分类内容纹丝不动。
+  - 根因一（后端）：`src/explore.mjs` 的 `.good` 兜底逻辑按「url 入口数多者胜」比较新旧结果。
+    七猫「📊 排行榜」只有 20 项、「🔄 动态分类」有 200+ 项，从后者切到前者时新结果 url 数必然变少，
+    被判定为「源站故障」→ 用旧缓存顶掉 → 用户看到的就是「切换没反应」。
+    同一问题也存在于 `bestCachedKinds()`（会拿 .good 回填覆盖主缓存）。
+  - 根因二（前端）：`public/online.js` 的 `runExploreAction()` 只在 `r.kinds` 非空时更新 state，
+    但没有重新渲染控件；且 `infoMap` 用覆盖而非合并，重绘时下拉会跳回旧值。
+  - 修法：
+    - `kindScore()` 增加 `content` 维度（排除 `java.*` 副作用），`keepBetterKinds()` 改为
+      「只有新结果**一个内容入口都没有**、旧的却有，才判定退化」，内容变少属正常筛选结果，一律放行。
+    - `bestCachedKinds()` 同样只在「主缓存零内容入口」时才用 `.good` 回填。
+    - `.good` 写入条件从「比上次更好」改为「新结果有内容入口就更新」。
+    - `runExploreAction()` 刷新后整块重绘；`infoMap` 改为合并（保留前端刚写入的当前值）。
+  - **逐个控件的实测结果**（每项都从该分组的干净基线出发，比较控件切到两个不同值时的 URL 指纹差异）：
+
+    | 分组 | 生效的下拉 | 产出内容 |
+    | --- | --- | --- |
+    | 📊 排行榜 | 性别 ✅、分类 ✅ | 20 项（推荐榜⭐/必读榜📖/大热榜🔥…） |
+    | 🔄 动态分类 | 性别 ✅、分类 ✅ | 223 项（爽文/都市/年代/玄幻…） |
+    | 📚 经典分类 | 分类 ✅、字数 ✅、状态 ✅、排序 ✅ | 41 项（★现代言情★/总裁豪门/职场情缘…） |
+    | 🏷️ 标签 | 分类 ✅、字数 ✅、状态 ✅、排序 ✅ | 36 项（热血/轻松/现实题材…） |
+
+  - **已知例外（书源自身缺陷，非阅读器问题）**：「🔄 动态分类」下的「📏 字数 / ⏳ 状态 / 📌 排序」不生效。
+    七猫脚本里这三个下拉写的是 `c.dynamicWords` / `c.dynamicOver` / `c.dynamicSort`，
+    但该分组只读取 `config.dynamicGender` 和 `config.dynamicGroup` 来拼分类列表，
+    **从未读取这三个变量**（脚本里出现 0 次）—— 变量存了却没人用，属书源作者留的摆设。
+    回归脚本把这 3 项显式记为「已知例外」，避免以后被误当成回归。
+  - 回归：`tools/regress/verify-explore-controls.mjs` **18/18 PASS**。
+
+  #### 2. 发现结果页残留上一次的内容 + loading 不消失
+  - 现象：点新分类后，标题已经变成「科幻末世」，列表还挂着上一次的《凡骨》等；
+    或内容已加载完，顶部仍留着「正在加载…」。
+  - 根因一：`loadExploreBooks()` 为了「翻页不闪」保留旧列表，但**换分类时也保留了**。
+  - 根因二：丢弃过期请求的分支 `if (seq !== exploreSeq) return;` 直接返回，
+    没有隐藏 `#expLoading`，于是那个 loading 一直挂在界面上。
+  - 修法：按「标题或 URL 变化」判定为换了内容源，立即清空列表 + 滚回顶部 + 显示「加载中…」；
+    丢弃过期请求时同步收掉 loading。
+  - 实测：切换后 150ms 采样 `earlyRows=0`、hint 为「加载中…」，2 秒内渲染出新列表（30 本）。
+  - 说明：光遇结果页本身的响应时间由源站决定（晴天书架 1186ms / 番茄书架 1938ms / 个性推荐 2763ms，
+    二次访问 586ms），这一项**不是**阅读器 bug。
+
+  #### 3. 内置浏览器「打开失败：浏览器进程启动即退出（exit 0）」
+  - 现象：点「用户后台 / 注册账号 / 永久发布页」等入口，内置浏览器窗口报
+    「打开失败：浏览器进程启动即退出（exit 0）」。
+  - 根因：**Edge 对同一个 `user-data-dir` 是单实例的**。已经有 Edge 占着这个 profile 时，
+    新起的 Edge 会把启动请求转交给已有实例，然后**以 exit 0 正常退出** ——
+    既不写 `DevToolsActivePort`，也不监听调试端口。
+    而旧代码在启动前先把这个文件删掉了，于是必然走进 `exit 0` 分支。
+  - 触发条件：同一个数据目录被两个 Reader 进程共用（源码版 + exe、或残留的测试进程）。
+  - 修法：`src/browser-host.mjs` 新增 `_tryReuseExisting()`：启动前先读上一次的 `DevToolsActivePort`，
+    探测它的 `/json/version` 是否还活着；活着就直接接管复用这个实例（书源登录只需要一个能投帧、
+    能回灌输入的内核）。复用时不持有 proc，用一个哨兵对象让 `alive()` 成立，
+    退出清理时不会误杀外部进程。
+  - 回归：`tools/regress/verify-webview-reuse.mjs` **6/6 PASS**；
+    真实 UI 点「🏝用户后台」实测窗口打开、canvas 渲染正常、无报错。
+
+  #### 4. 支持同时开多个 Reader 实例
+  - 规则：**数据目录（`cacheDir`）不同 = 不同实例，可以并存**；
+    数据目录相同 = 同一个实例，重复启动会被识别为「已在运行」并退出。
+  - 拦路 bug：`/api/instance` 只返回 `dataDir`（程序目录，即 `Reader/`），
+    而「是否同一实例」的判定用的就是它。用户用不同的 `READER_CACHE_DIR` 想开两份时，
+    两个进程返回的 `dataDir` 都是 `Reader` → 第二个被误判成「已在运行」→ 直接退出。
+  - 修法：`/api/instance` 新增 `cacheDir` 字段（真正的数据目录）；
+    `probeSameInstance()` 改为按 `cacheDir` 比较，保留旧版按 `dataDir` 的兼容回退。
+  - **怎么开两个进程**：
+    ```powershell
+    # 实例 1（默认数据目录 Reader/cache，端口 7788）
+    node server.mjs --port 7788
+
+    # 实例 2（独立数据目录 + 独立端口）
+    $env:READER_CACHE_DIR = "C:\WorkSpace\CodexProject\Project3\Reader-cache2"
+    node server.mjs --port 7789
+    ```
+    两个实例各自有独立的 `cache/`（登录态、WebView profile、发现缓存都分开），互不干扰；端口必须不同。
+  - 注意：若两个实例**共用同一个数据目录**，它们的 WebView 会抢同一个 Edge 实例
+    （第 3 项已修成复用，不会报错），但两个进程同时操作同一 profile 仍可能有竞争，
+    推荐用不同数据目录。
+  - 回归：`tools/regress/verify-multi-instance.mjs` **8/8 PASS**。
+
+  #### 5. 数据目录说明（澄清）
+  - 源码模式（在 `Reader/` 里跑 `node server.mjs`）→ 数据在 `Reader/cache/`
+  - exe 模式（双击 `Reader/dist/Reader.exe`）→ 数据在 `Reader/dist/cache/`
+  - 两者**不是**同一个目录：`server.mjs` 用 `isSea()` 区分，
+    源码模式取 `server.mjs` 所在目录，exe 模式取 `process.execPath` 所在目录。
+  - 因此把 `dist/Reader/`（只有 exe + README）发给别人，不会带上开发者的登录态。
+
+  #### 6. 本轮新增的回归脚本
+  | 脚本 | 覆盖 |
+  | --- | --- |
+  | `tools/regress/verify-explore-controls.mjs` | 发现页所有下拉是否真的生效（18 项） |
+  | `tools/regress/verify-webview-reuse.mjs` | 内置浏览器复用已有实例，不再 exit 0（6 项） |
+  | `tools/regress/verify-multi-instance.mjs` | 多实例并存 / 同实例识别（8 项） |
+  | `tools/regress/verify-exe-state-path.mjs` | exe 登录态落在自己目录、不带开发者凭证（7 项） |
+  | `tools/regress/verify-explore-login-hint.mjs` | 未登录时发现页提示，且不误伤其它书源（8 项） |
+  | `tools/regress/verify-device-id.mjs` | deviceId 唯一且持久（6 项） |
+
 - **2026-09-20**：完成「第 10 章直接跳第 57 章远距离跳章卡顿」优化，并回退后续引入风控的任意章预取。
   - 第一阶段根因：目录点击也被复用了滚轮翻章的连续滚动逻辑，远距离跳转时旧章与新章被拼在一起滚动，视觉上既慢又生硬；冷目标章缺少等待反馈，用户感知像卡死。
   - `Reader/public/app.js`：`runChapter()` / `gotoChapter()` 增加 `gesture` 参数；只有滚轮翻章（`wheel`）保留连续阅读动画，目录点击、按钮、键盘、进度条等直接跳章一律瞬时替换正文。
@@ -452,6 +867,37 @@ node server.mjs
 ```
 
 关闭服务可使用 `Reader/关闭Reader.bat`，启动服务可使用 `Reader/启动Reader.bat`。
+
+### 2.1 同时运行多个实例
+
+`Reader` 支持同时开多份，判据是**数据目录（`cacheDir`）是否相同**：
+
+| 情况 | 结果 |
+| --- | --- |
+| 数据目录不同 | ✅ 可以同时运行，各自独立的登录态 / 缓存 / WebView profile |
+| 数据目录相同 | ❌ 后启动的会识别为「已在运行」并退出（避免两个进程写同一份缓存） |
+
+数据目录由 `READER_CACHE_DIR` 决定，默认是 `<程序目录>/cache`：
+
+- 源码模式（`Reader/server.mjs`）→ `Reader/cache`
+- exe 模式（`Reader/dist/Reader.exe`）→ `Reader/dist/cache`
+
+**开两个进程的写法**：
+
+```powershell
+# 实例 1：默认数据目录，端口 7788
+node server.mjs --port 7788
+
+# 实例 2：独立数据目录 + 独立端口
+$env:READER_CACHE_DIR = "C:\WorkSpace\CodexProject\Project3\Reader-cache2"
+node server.mjs --port 7789
+```
+
+端口必须不同；数据目录不同则两边的登录态、发现缓存、WebView profile 完全隔离。
+
+**关于 WebView**：`BrowserHost` 对同一个 profile 目录只会有一个 Edge 实例（Edge 本身的单实例限制）。
+第二个 Reader 若共用同一数据目录，会自动**复用**已有 Edge（不会报 `exit 0`），
+但两个进程同时操作同一 profile 仍可能有竞争，所以推荐用不同数据目录。
 
 ## 3. 已完成或代码中已有的能力
 

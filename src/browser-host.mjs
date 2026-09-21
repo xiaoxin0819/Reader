@@ -315,10 +315,73 @@ export class BrowserHost extends EventEmitter {
     return this.starting;
   }
 
+  /**
+   * 复用已经在跑、且占着本 profile 的浏览器实例。
+   *
+   * 背景见 _launch() 的注释：Edge 对同一个 user-data-dir 是单实例的，
+   * 已有实例在跑时新进程会 exit 0。这里通过上一次写下的 DevToolsActivePort
+   * 找到它的调试端口并接管，避免「打开失败：浏览器进程启动即退出（exit 0）」。
+   *
+   * @returns {Promise<boolean>} 是否成功接管
+   */
+  async _tryReuseExisting(portFile) {
+    let port = 0;
+    try {
+      const text = fs.readFileSync(portFile, "utf8");
+      port = Number(String(text).split(/\r?\n/)[0]) || 0;
+    } catch (e) {
+      return false;   // 没有端口文件 = 没有可复用的实例
+    }
+    if (!port) return false;
+
+    let ver = null;
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      try {
+        const r = await fetch("http://127.0.0.1:" + port + "/json/version");
+        ver = await r.json();
+        break;
+      } catch (e) { await sleep(200); }
+    }
+    if (!ver || !ver.webSocketDebuggerUrl) return false;   // 端口在但服务已死
+
+    try {
+      this.conn = await CdpConnection.connect(ver.webSocketDebuggerUrl);
+      this.port = port;
+      // 复用别人的实例时 this.proc 为 null：alive() 依赖 proc，
+      // 这里补一个「哨兵」让 alive() 判定成立（退出清理时不会再误杀外部进程）。
+      this.proc = { exitCode: null, killed: false, kill() { this.killed = true; } };
+      this.emit("ready", { port, bin: this.bin, reused: true });
+      return true;
+    } catch (e) {
+      this.conn = null;
+      this.proc = null;
+      this.port = 0;
+      return false;
+    }
+  }
+
   async _launch() {
     if (!this.bin) throw new Error("未找到 Edge / Chrome，登录与验证类书源需要本机浏览器内核");
     try { fs.mkdirSync(this.dataDir, { recursive: true }); } catch (e) { /* ignore */ }
     const portFile = path.join(this.dataDir, "DevToolsActivePort");
+
+    /**
+     * 先尝试复用「已经在用这个 profile 的浏览器实例」。
+     *
+     * 为什么必须这么做：Edge 的 user-data-dir 是单实例的。如果已经有 Edge 进程
+     * 占着这个 profile（上一次没被正常关掉、或同时跑了源码版和 exe 版两个 Reader，
+     * 它们共用同一个 cache/webview），新起的 Edge 会把启动请求转交给已有实例，
+     * 然后自己**以 exit 0 正常退出** —— 既不会写 DevToolsActivePort，也不会监听端口。
+     * 旧代码在启动前先删掉 DevToolsActivePort，于是这种情况必然抛
+     * 「浏览器进程启动即退出（exit 0）」，用户看到的就是「打开失败」。
+     *
+     * 复用方式：读上一次留下的 DevToolsActivePort，探测它的 /json/version 是否还活着；
+     * 活着就直接接管这个实例（书源登录只需要一个能投帧、能回灌输入的内核）。
+     */
+    const reused = await this._tryReuseExisting(portFile);
+    if (reused) return;
+
     try { fs.rmSync(portFile, { force: true }); } catch (e) { /* ignore */ }
 
     const args = [

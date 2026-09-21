@@ -92,7 +92,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://www.shudugu.org",
@@ -188,7 +191,9 @@
     "eventListener": false,
     "customButton": false,
     "noExport": true,
-    "noShelfWarm": true
+    "noShelfWarm": true,
+    "limited": true,
+    "concurrencyLimit": 3
   },
   {
     "bookSourceUrl": "https://bookshelf.html5.qq.com",
@@ -283,7 +288,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://api-bc.wtzw.com#七猫官方API",
@@ -378,7 +386,10 @@
     "mainJs": null,
     "eventListener": true,
     "customButton": true,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://m.cuoceng.org/",
@@ -473,7 +484,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "http://wap.qiqixs.info/",
@@ -568,7 +582,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://www.shoujixs.net",
@@ -663,7 +680,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "http://www.apap.net",
@@ -758,7 +778,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://www.dingdian888.com/",
@@ -853,7 +876,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "http://www.yetianlian.la#🎃",
@@ -948,7 +974,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "http://wap.aixswx.com",
@@ -1043,7 +1072,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "去789",
@@ -1138,7 +1170,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "http://www.xbiqugu.la",
@@ -1233,7 +1268,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "http://www.ujxs.com",
@@ -1328,7 +1366,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "http://m.wujixsw.org",
@@ -1423,7 +1464,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://www.dbxsn.com",
@@ -1518,7 +1562,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://www.lysw1.com",
@@ -1613,7 +1660,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://www.deqixs.cc/",
@@ -1708,7 +1758,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "http://m.ibiquzw.info",
@@ -1803,7 +1856,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://www.tycqzw.la#🎃",
@@ -1898,7 +1954,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "http://m.elkoparts.com/",
@@ -1993,7 +2052,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://www.aaawz.cc",
@@ -2088,7 +2150,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://www.sudugu.org",
@@ -2184,7 +2249,9 @@
     "eventListener": false,
     "customButton": false,
     "noExport": true,
-    "noShelfWarm": true
+    "noShelfWarm": true,
+    "limited": true,
+    "concurrencyLimit": 3
   },
   {
     "bookSourceUrl": "https://fanqienovel.com",
@@ -2279,7 +2346,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://novel.html5.qq.com",
@@ -2374,7 +2444,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://www.zongheng.com/##zhbyjm7783",
@@ -2469,7 +2542,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://so.html5.qq.com#v2修复版",
@@ -2564,7 +2640,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "免费看书",
@@ -2659,7 +2738,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://ubook.reader.qq.com/",
@@ -2754,7 +2836,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "http://111.170.19.23:49998/#起点",
@@ -2849,7 +2934,10 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   },
   {
     "bookSourceUrl": "https://m.qidian.com#按钮筛选",
@@ -2944,6 +3032,9 @@
     "mainJs": null,
     "eventListener": false,
     "customButton": false,
-    "noExport": false
+    "noExport": false,
+    "noShelfWarm": false,
+    "limited": false,
+    "concurrencyLimit": 0
   }
 ]

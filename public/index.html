@@ -29,8 +29,15 @@
     <div id="bookMeta" class="book-meta"></div>
   </div>
   <div class="right">
-    <button id="btnPrevBook" class="icon-btn nav-book" title="上一本（Alt+←）">‹‹</button>
-    <button id="btnNextBook" class="icon-btn nav-book" title="下一本（Alt+→）">››</button>
+    <!-- 翻章导航：原来这里翻的是「上一本 / 下一本」（stepBook），
+         但用户真正高频的是翻章，且与底部「上一章 / 下一章」语义冲突，故统一为翻章。
+         翻整本保留在底部 #btnPrev / #btnNext 与 Alt+←/→。
+         tooltip 里的快捷键与 app.js 末尾 keydown 处理器保持一致（← / → 翻章）。 -->
+    <button id="btnPrevBook" class="icon-btn nav-book" title="上一章（← / PageUp）">‹</button>
+    <button id="btnNextBook" class="icon-btn nav-book" title="下一章（→ / PageDown）">›</button>
+    <!-- 自动下一章开关。原来只在「阅读设置」里，翻页时要开设置很别扭；
+         这里做成顶栏一键切换，与设置面板里的复选框双向同步（同一个 state.settings.autoNext）。 -->
+    <button id="btnAutoNext" class="icon-btn auto-next-btn on" title="自动下一章：已开启（滚到章末自动翻）">⏭</button>
     <span class="vsep"></span>
     <button id="btnChangeSource" class="icon-btn only-online" title="换源（按书名+作者重新搜源）">⇄</button>
     <button id="btnRefresh" class="icon-btn only-online" title="重新抓取本章正文（换源/清缓存后用它兜底）">⟳</button>
@@ -171,26 +178,6 @@
       <label class="row"><span>首行缩进</span><input id="setIndent" type="range" min="0" max="4" step="0.5"><b id="vIndent"></b></label>
       <label class="row"><span>字距</span><input id="setLetter" type="range" min="0" max="3" step="0.5"><b id="vLetter"></b></label>
       <label class="row"><span>版心宽度</span><input id="setMaxWidth" type="range" min="520" max="1400" step="20"><b id="vMaxWidth"></b></label>
-      <label class="row"><span>字体</span>
-        <select id="setFamily">
-          <option value="serif">宋体 / 衬线</option>
-          <option value="song">思源宋体</option>
-          <option value="kai">楷体</option>
-          <option value="hei">黑体</option>
-        </select><b></b>
-      </label>
-      <label class="row check"><span>自动下一章</span>
-        <input id="setAutoNext" type="checkbox">
-        <b></b>
-      </label>
-      <div class="font-block">
-        <div class="font-head">
-          <span>自定义字体</span>
-          <button id="btnAddFont" class="ghost-btn">+ 添加字体文件</button>
-        </div>
-        <div id="fontList" class="font-list"></div>
-        <input id="fontFile" type="file" accept=".ttf,.otf,.woff,.woff2,.ttc" hidden>
-      </div>
       <!-- 书源抓取并发数（worker 池大小）。legado 里对应 okHttpClient 的 Dispatcher
            并发线程数；这里按用户机器性能可调。改完立即生效，不需要重启服务。 -->
       <div class="row pool-block only-online">
@@ -201,6 +188,27 @@
       <div class="hint pool-hint only-online" id="poolHint">
         调大：多书源搜索 / 发现更快，但同一书源的连接会被分散。<br>
         调小：单本正文连接复用更充分，但多源并发变低。
+      </div>
+      <!-- 「自动下一章」已移到顶栏按钮（#btnAutoNext），设置面板不再重复一份。
+           保留 state.settings.autoNext 作为唯一状态源，只由顶栏按钮读写。 -->
+      <!-- 字体：说明（字体）在左上、导入按钮在右上，选择框独占一行放在下面。
+           选择框是一个自定义控件（不是原生 <select>）：
+             · 每个选项用它自己对应的字体渲染，方便直接看出效果；
+             · 自定义字体那几项右侧带一个 ✕，点了就删掉该字体；
+             · 内置字体（宋体/楷体等）没有 ✕，不可删除。
+           原来下面还有一块独立的「自定义字体」列表，与这里信息重复，已移除。 -->
+      <div class="font-block">
+        <div class="font-head">
+          <span>字体</span>
+          <button id="btnAddFont" class="ghost-btn">+ 添加字体文件</button>
+        </div>
+        <div class="font-picker" id="fontPicker">
+          <button type="button" class="fp-btn" id="fontPickerBtn" aria-haspopup="listbox" aria-expanded="false">
+            <span class="fp-cur" id="fontPickerCur"></span>
+            <span class="fp-caret">▾</span>
+          </button>
+        </div>
+        <input id="fontFile" type="file" accept=".ttf,.otf,.woff,.woff2,.ttc" hidden>
       </div>
       <div class="row-btns">
         <button id="setReset" class="ghost-btn">恢复默认</button>
@@ -498,15 +506,13 @@
     </div>
 
     <section id="replacePane" class="replace-pane">
-      <div class="src-groupbar">
-      <label class="src-group-label" for="sourceGroupSelect">书源组</label>
-      <select id="sourceGroupSelect" class="mini-select"></select>
-      <button id="srcGroupCreate" class="ghost-btn" type="button">新建</button>
-      <button id="srcGroupRename" class="ghost-btn" type="button">重命名</button>
-      <button id="srcGroupDelete" class="ghost-btn" type="button">删除</button>
-      <span id="sourceGroupStat" class="hint"></span>
-    </div>
-    <div class="src-toolbar">
+      <!-- 这里原来又放了一份「书源组」下拉 + 新建/重命名/删除。
+           它与「书源管理」页的同名控件 id 完全重复（HTML 里共出现 3 次），
+           而 $() 只返回第一个 —— 于是本页这些按钮全是死的；
+           又因为 .src-groupbar 在 flex 列里没有 flex:0 0 auto 被压扁，
+           整行被挤到面板外看不见。替换净化管的是「规则」，不是「书源组」，
+           所以直接移除，书源组只保留在书源管理页。 -->
+      <div class="src-toolbar">
         <input id="replaceFilter" class="mini-input" placeholder="搜索规则…">
         <button id="replaceBuiltin" class="ghost-btn">恢复内置规则</button>
         <button id="replaceAdd" class="ghost-btn">新建规则</button>
@@ -525,15 +531,9 @@
     </section>
 
     <section id="txtTocPane" class="replace-pane hidden">
-      <div class="src-groupbar">
-      <label class="src-group-label" for="sourceGroupSelect">书源组</label>
-      <select id="sourceGroupSelect" class="mini-select"></select>
-      <button id="srcGroupCreate" class="ghost-btn" type="button">新建</button>
-      <button id="srcGroupRename" class="ghost-btn" type="button">重命名</button>
-      <button id="srcGroupDelete" class="ghost-btn" type="button">删除</button>
-      <span id="sourceGroupStat" class="hint"></span>
-    </div>
-    <div class="src-toolbar">
+      <!-- 同 replacePane：这里也重复了一份「书源组」控件（id 与书源管理页冲突），
+           TXT 目录规则与书源组无关，一并移除，消除重复 id。 -->
+      <div class="src-toolbar">
         <input id="txtTocFilter" class="mini-input" placeholder="搜索目录规则…">
         <button id="txtTocAdd" class="ghost-btn">新增</button>
         <button id="txtTocImport" class="ghost-btn">本地导入</button>
@@ -576,6 +576,12 @@
     <button id="verifySubmit" class="primary-btn">提交，继续抓取</button>
   </div>
 </div>
+
+<!-- 字体下拉菜单：挂在 body 下、position:fixed。
+     不能放在 .font-picker 里用 position:absolute ——
+     .modal-box 有 overflow:hidden、.settings-body 有 overflow-y:auto，
+     而字体块位于设置面板最后一行，往下展开会被这两层容器裁掉半截。 -->
+<div class="fp-menu hidden" id="fontPickerMenu" role="listbox"></div>
 
 <script src="online.js"></script>
 </body>

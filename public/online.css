@@ -263,6 +263,12 @@ body[data-mode="local"] .only-online{display:none!important}
    同一行的标签收进 .ek-chip-row，按各格比例铺满整行。七猫「爽文/都市/年代/玄幻」= 0.2*4、
    「玄幻脑洞/扮猪吃虎/杀伐果断」= 0.25*3 都靠这里还原，不能再让首项独占整条。 */
 .ek-chip-row{display:flex;flex-wrap:wrap;flex:0 0 100%;width:100%;box-sizing:border-box;gap:6px;align-items:stretch}
+/* 未登录导致分类残缺时的提示条：横跨整行，不参与 chip 的等比排版 */
+.ek-need-login{flex:0 0 100%;width:100%;box-sizing:border-box;display:flex;align-items:center;
+  justify-content:space-between;gap:10px;padding:8px 10px;margin-bottom:6px;
+  border:1px solid rgba(212,150,42,.45);background:rgba(212,150,42,.10);border-radius:8px;
+  font-size:13px;line-height:1.5;color:inherit}
+.ek-need-login .ek-login-btn{flex:0 0 auto;white-space:nowrap}
 /* 不给 min-width:0 —— 保留 flex 项默认的 min-width:auto（= 文字宽度），
    这样书源给的 flexBasisPercent 只当「一行放几格」的参考，文字放不下时自然换行，
    而不是被压成一格几个字 + 省略号（光遇聚合的「百万字以下完结文」就是这么被截断的）。 */
@@ -502,6 +508,25 @@ body[data-mode="local"] .only-online{display:none!important}
 .ask-foot .ghost-btn{background:var(--hover);color:var(--muted)}
 .ask-ok{background:var(--accent);color:#fff}
 .ask-ok:hover{filter:brightness(1.08)}
+
+/* ---------------- 后台预热进度弹窗（⚡ 按钮） ----------------
+   三处预热（最近阅读 / 书架正文 / 发现页分类）统一在这里显示进度条。
+   自动轮询，不需要用户手动刷新；全部跑完且无记录时显示「当前没有在跑的任务」。 */
+.pw-box{width:min(520px,92vw)}
+.pw-body{padding:14px 18px 4px;max-height:min(60vh,520px);overflow:auto}
+.pw-empty{padding:20px 18px;font-size:13px;color:var(--muted);text-align:center}
+.pw-item{margin-bottom:16px}
+.pw-item:last-child{margin-bottom:8px}
+.pw-top{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-bottom:6px}
+.pw-name{font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pw-pct{font-size:12px;color:var(--muted);flex:0 0 auto;font-variant-numeric:tabular-nums}
+.pw-bar{height:8px;border-radius:4px;background:var(--hover);overflow:hidden}
+.pw-fill{height:100%;width:0;border-radius:4px;background:var(--accent);transition:width .25s ease-out}
+.pw-fill.done{background:#3aa76d}
+.pw-fill.failed{background:#d9534f}
+.pw-sub{margin-top:5px;font-size:12px;color:var(--muted);display:flex;justify-content:space-between;gap:10px}
+.pw-cur{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.pw-stat{flex:0 0 auto;font-variant-numeric:tabular-nums}
 
 /* ---------------- 站内输入 / 文本查看弹窗 ----------------
    legado 里凡是需要用户敲字的入口都走 AlertDialog + customView：
@@ -758,6 +783,13 @@ body[data-mode="local"] .only-online{display:none!important}
 .rt-tab.active{color:var(--accent);border-bottom-color:var(--accent);background:var(--accent-soft)}
 .replace-pane{display:flex;flex-direction:column;flex:1 1 auto;min-height:0}
 .replace-pane.hidden{display:none}
+/* 面板内的工具行/分组行一律不许被压缩。
+   历史问题：.src-groupbar 在 .replace-pane（flex 列）里没有 flex 收缩保护，
+   高度被压到 49px（内容需要约 70px），下拉框被压扁、按钮换行后被挤出可视区，
+   表现为「书源组那一行看不见」。这里统一加上，避免以后再加同类行时复发。 */
+.replace-pane > .src-groupbar,
+.replace-pane > .src-toolbar,
+.replace-pane > .src-listbar{flex:0 0 auto}
 .replace-pane .src-toolbar{flex:0 0 auto}
 .replace-pane .src-list{flex:1 1 auto;min-height:0}
 .replace-pane .replace-selbar{flex:0 0 auto}

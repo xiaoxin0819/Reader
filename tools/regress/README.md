@@ -19,6 +19,10 @@
 | `verify-far-jump-direct.mjs` | 目录远距离跳章是瞬时换章、hover 不预取、失败保留旧章 |
 | `verify-shelf-page-sync.mjs` | 刷新后书架停在该书所在页、抓完目录补齐「读到/最新」 |
 | `verify-online-first-open.mjs` | 重启后首次打开书的正文渲染耗时 |
+| `verify-source-concurrency.mjs` | 书源并发闸门：同书源同时最多 N 个在飞（纯本地，不连源站） |
+| `verify-font-picker.mjs` | 字体选择器：逐项字体渲染、自定义项带 ✕、内置项不可删 |
+| `verify-auto-next-button.mjs` | 顶栏「自动下一章」按钮与 state 同步、设置面板已无残留 |
+| `verify-nav-hotkeys.mjs` | 顶栏翻章按钮的快捷键标注与 ←/→/PageUp/PageDown 实际行为 |
 
 ## 用法
 

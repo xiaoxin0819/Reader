@@ -13,11 +13,33 @@ import fs from 'node:fs';
 import { mergeCookies } from './js-runtime.mjs';
 import { getKey as getSourceKey } from './book-source-model.mjs';
 import { fileURLToPath } from 'node:url';
-import { createWorker } from './exe-env.mjs';
+import { createWorker, isSea } from './exe-env.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = path.join(__dirname, 'book-worker.mjs');
-const STATE_PATH = path.join(__dirname, '..', 'cache', 'login-state.json');
+/**
+ * 登录态 / 书源变量的落盘位置。
+ *
+ * ⚠ 必须**运行时**求值，不能写成模块级常量：
+ *   ESM 的 import 会被提升，本模块在 server.mjs 第 47 行就执行完了，
+ *   而 server.mjs 到第 161 行才设置 READER_CACHE_DIR ——
+ *   常量会在环境变量还没设好时就定下来。
+ *
+ * 为什么优先用 READER_CACHE_DIR：
+ *   exe（SEA）模式下 esbuild 把 import.meta.url 替换成占位路径，
+ *   __dirname 变成 C:\__reader__，再往上跳一级就是 C:\cache，
+ *   书源变量会被写到 C 盘根目录，而 exe 自己读的是 <exe目录>/cache，
+ *   两边对不上 → getVariable('云端配置') 永远为空 →
+ *   光遇聚合的发现页只剩筛选框（11 项）。
+ */
+function statePath() {
+  const dir = process.env.READER_CACHE_DIR;
+  if (dir) return path.join(path.resolve(dir), 'login-state.json');
+  // exe（SEA）下 __dirname 是打包占位路径，必须用 exe 所在目录，
+  // 否则会退化成 C:\cache —— 又变成「登录态写到别处」。
+  const root = isSea() ? path.dirname(process.execPath) : path.join(__dirname, '..');
+  return path.join(root, 'cache', 'login-state.json');
+}
 
 /**
  * 登录态落盘。legado 的 CookieStore 每次 setCookie 都 appDb.cookieDao.insert()、
@@ -25,7 +47,7 @@ const STATE_PATH = path.join(__dirname, '..', 'cache', 'login-state.json');
  * 重启即掉登录 —— 这里补上等价物（写盘走同步写，量很小：只有 cookie + 登录变量）。
  */
 function readStateFile() {
-  try { return JSON.parse(fs.readFileSync(STATE_PATH, 'utf8')); } catch (e) { return null; }
+  try { return JSON.parse(fs.readFileSync(statePath(), 'utf8')); } catch (e) { return null; }
 }
 /** 合并两份登录态快照（cookie 用 mergeCookies 同域合并，cache 后写覆盖） */
 function mergeState(prev, next) {
@@ -47,13 +69,22 @@ function mergeState(prev, next) {
 
 function writeStateFile(data) {
   try {
-    fs.mkdirSync(path.dirname(STATE_PATH), { recursive: true });
-    fs.writeFileSync(STATE_PATH, JSON.stringify({ cookie: data.cookie || [], cache: data.cache || [] }));
+    const p = statePath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({ cookie: data.cookie || [], cache: data.cache || [] }));
   } catch (e) { /* 落盘失败不影响本次登录 */ }
 }
 
 const DEFAULT_TIMEOUT = 90000;
 const DEFAULT_SIZE = Number(process.env.READER_POOL_SIZE || 4);
+
+/**
+ * 走「发现页」的任务类型。
+ *
+ * 这些任务共享 worker 内的模块级状态（分类缓存 / InfoMap）和 HTTP 连接池，
+ * 必须按书源固定到同一个 worker，见 exploreSlotIndex 的注释。
+ */
+const EXPLORE_TYPES = new Set(['explore', 'exploreKinds', 'exploreAction', 'exploreUiJs', 'exploreClearCache']);
 
 /** FNV-1a：不引入 crypto，也避免不同 JS 引擎的字符串哈希差异。 */
 function hashSlot(key, slotCount) {
@@ -101,6 +132,52 @@ export function contentSlotIndex(sourceUrl, bookUrl, slotCount) {
   const key = String(sourceUrl || '').trim();
   if (!key || !slotCount) return -1;
   return hashSlot(key + '|' + String(bookUrl || ''), slotCount);
+}
+
+/**
+ * 发现页（explore / exploreKinds / exploreAction / exploreUiJs）固定 worker 下标。
+ *
+ * 为什么必须固定：`explore.mjs` 里的 `exploreKindsMap`（分类内存缓存）和
+ * `exploreInfoMapList`（InfoMap）都是**模块级状态，每个 worker 各一份**，
+ * 而 legado 里它们是进程内单例。池里 4 个 worker 轮询接任务时，同一个书源
+ * 会轮流落到不同 worker：
+ *   1) InfoMap（线路 / 频道 / 平台 / 字数 / 更新 / 排序）在不同 worker 上
+ *      各存一份。用户改完筛选条件，下一次请求落到别的 worker 就读到旧值，
+ *      界面上的筛选与返回结果对不上。
+ *   2) 每个 worker 各自跑一遍分类脚本、各自缓存一份结果。
+ *   3) 每个 worker 有自己的 http(s).Agent 连接池，TLS 连接不能跨 worker 共享。
+ *      请求散在 4 个 worker 上，等于每次都要在冷连接上重新握手 ——
+ *      表现就是「没点过的分类要 5s+，点过的 1-2s」。
+ *
+ * 固定到同一个 worker 后，上述三个问题一起消失（与 legado 里
+ * BookSourceExtensions 的 exploreKindsMap / exploreInfoMapList 是进程内单例等价）。
+ */
+export function exploreSlotIndex(sourceUrl, slotCount) {
+  const key = String(sourceUrl || '').trim();
+  if (!key || !slotCount) return -1;
+  return hashSlot(key, slotCount);
+}
+
+/**
+ * 取某书源的并发上限（0 = 不限制）。
+ *
+ * 对应书源管理里的「限制该书源（防封禁）」：勾上后 concurrencyLimit=3，
+ * 表示同一书源**同时最多 3 个请求在飞**，避免一次性并发太多触发站点风控。
+ *
+ * 与 concurrentRate 的区别：
+ *   · concurrentRate 是 legado 自带的「速率」限制（N 次 / 每 M 毫秒），
+ *     管的是**频率**；而且我们已按用户原始书源把它清成 null。
+ *   · concurrencyLimit 是「同时几个在飞」，管的是**并发度**。
+ *     速读谷这类站点的问题正是并发度过高（一开书就同时打 3 个章节请求），
+ *     所以需要的是后者。
+ */
+export function sourceConcurrencyLimit(sourceUrl, sources) {
+  const key = String(sourceUrl || '').trim();
+  if (!key) return 0;
+  const source = (sources || []).find((s) => getSourceKey(s) === key);
+  if (!source) return 0;
+  const n = Math.trunc(Number(source.concurrencyLimit) || 0);
+  return n > 0 ? n : 0;
 }
 
 class Slot {
@@ -200,10 +277,63 @@ export class BookPool {
     this.slots = [];
     this.closed = false;
     this.rr = 0;
+    /**
+     * 书源级并发闸门：sourceKey -> { limit, active, queue: [] }。
+     *
+     * 用于「限制该书源（防封禁）」（concurrencyLimit=3）：
+     * 同一书源同时最多 N 个请求在飞，多出来的排队等前面的完成。
+     *
+     * 为什么必须做在池这一层而不是 worker 里：
+     * worker 是「一个 worker 同时只跑一个任务」，但**多个 worker 可以同时跑
+     * 同一个书源**（书源没配 concurrentRate 时走忙闲轮询）。
+     * 所以「同时最多 3 个」只能在能看到全部 worker 的主线程池里统一裁决。
+     */
+    this.gates = new Map();
     for (let i = 0; i < this.size; i++) this.slots.push(new Slot(this, i));
   }
 
   sourcesSnapshot() { return this.sources; }
+
+  /**
+   * 取（或建）某书源的并发闸门。
+   * limit <= 0 表示不限制，直接返回 null，调用方跳过排队。
+   */
+  _gateFor(sourceKey) {
+    const key = String(sourceKey || '').trim();
+    if (!key) return null;
+    const limit = sourceConcurrencyLimit(key, this.sources);
+    if (limit <= 0) {
+      // 限制被取消：清掉旧闸门，并放行所有排队者
+      const old = this.gates.get(key);
+      if (old) {
+        this.gates.delete(key);
+        while (old.queue.length) old.queue.shift()();
+      }
+      return null;
+    }
+    let g = this.gates.get(key);
+    if (!g) { g = { limit, active: 0, queue: [] }; this.gates.set(key, g); }
+    g.limit = limit;   // 设置面板改过上限时跟着更新
+    return g;
+  }
+
+  /** 等一个并发名额（拿到就 resolve；limit<=0 时立刻 resolve） */
+  _acquire(sourceKey) {
+    const g = this._gateFor(sourceKey);
+    if (!g) return Promise.resolve(null);
+    if (g.active < g.limit) { g.active++; return Promise.resolve(g); }
+    return new Promise((resolve) => {
+      g.queue.push(() => { g.active++; resolve(g); });
+    });
+  }
+
+  /** 释放名额并唤醒下一个排队者 */
+  _release(g) {
+    if (!g) return;
+    g.active = Math.max(0, g.active - 1);
+    const next = g.queue.shift();
+    if (next) next();
+  }
 
   /** 轮询 + 忙闲优先 */
   _pick() {
@@ -216,9 +346,45 @@ export class BookPool {
     return this.slots[this.rr];
   }
 
+  /**
+   * 派发任务。
+   *
+   * 若该书源勾了「限制该书源（防封禁）」（concurrencyLimit>0），
+   * 先过并发闸门：同时最多 N 个在飞，多出来的排队等前面的完成。
+   * 未限制的书源走原路径（零开销）。
+   */
   request(type, payload, opts = {}) {
+    const sourceKey = payload && (payload.sourceUrl || payload.sourceKey);
     const slot = opts.slot || this._pinnedSlotForPayload(payload, type) || this._pick();
-    return slot.run(type, payload, opts.timeout || this.timeout);
+    const run = () => slot.run(type, payload, opts.timeout || this.timeout);
+    // 不限制的书源：保持原样，不引入 Promise 包装开销
+    if (!sourceKey || sourceConcurrencyLimit(sourceKey, this.sources) <= 0) return run();
+    return this._acquire(sourceKey).then((gate) => {
+      if (!gate) return run();
+      return run().finally(() => this._release(gate));
+    });
+  }
+
+  /**
+   * 挑一个「空闲、且不是 excludeIndex」的 worker。
+   *
+   * 用途：后台预热这类**绝不该挡住用户**的任务。
+   *
+   * 为什么需要：worker 的任务处理是同步阻塞的（书源 JS 里 java.ajax 走 Atomics.wait），
+   * 一个 worker 同时只能跑一个任务，后来的消息会排队。发现页按书源固定了 worker
+   * （见 exploreSlotIndex），如果预热也走那个 worker，用户点框就得排在预热后面 ——
+   * 预热反而把界面拖慢了。
+   *
+   * @returns {Slot|null} 没有空闲 worker 时返回 null，调用方应跳过本轮（用户优先）
+   */
+  pickIdleSlot(excludeIndex = -1) {
+    const n = this.slots.length;
+    for (let i = 0; i < n; i++) {
+      const s = this.slots[(this.rr + i) % n];
+      if (s.index === excludeIndex) continue;
+      if (!s.busy) return s;
+    }
+    return null;
   }
 
   /**
@@ -232,6 +398,11 @@ export class BookPool {
     const sourceUrl = payload && (payload.sourceUrl || payload.sourceKey);
     const rateIdx = rateLimitedSlotIndex(sourceUrl, this.sources, this.slots.length);
     if (rateIdx >= 0) return this.slots[rateIdx];
+    // 发现页：分类缓存 / InfoMap / TLS 连接池都在 worker 内，必须按书源固定（见 exploreSlotIndex）
+    if (EXPLORE_TYPES.has(type)) {
+      const exIdx = exploreSlotIndex(sourceUrl, this.slots.length);
+      return exIdx >= 0 ? this.slots[exIdx] : null;
+    }
     if (type === 'content') {
       const idx = contentSlotIndex(sourceUrl, payload && (payload.bookUrl || (payload.book && payload.book.bookUrl)), this.slots.length);
       return idx >= 0 ? this.slots[idx] : null;
@@ -248,7 +419,15 @@ export class BookPool {
    */
   async runAndSync(type, payload, opts = {}) {
     const slot = (opts && opts.slot) || this._pinnedSlotForPayload(payload) || this._pick();
-    const r = await slot.run(type, payload, (opts && opts.timeout) || this.timeout);
+    // 登录类任务同样受书源并发闸门约束（它也是打源站的请求）
+    const sourceKey = payload && (payload.sourceUrl || payload.sourceKey);
+    const gate = sourceKey ? await this._acquire(sourceKey) : null;
+    let r;
+    try {
+      r = await slot.run(type, payload, (opts && opts.timeout) || this.timeout);
+    } finally {
+      this._release(gate);
+    }
     // 登录类调用要把登录态**立刻**同步出去（不能等防抖窗口，用户马上就会去取正文）
     await this.flushState().catch(() => 0);
     return Object.assign({}, r, { slotIndex: slot.index });

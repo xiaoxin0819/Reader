@@ -44,7 +44,7 @@ if (isSea()) {
   };
 }
 import { decodeBuffer, analyzeText } from "./parse-core.mjs";
-import { BookPool } from "./src/book-pool.mjs";
+import { BookPool, exploreSlotIndex } from "./src/book-pool.mjs";
 import {
   parseSourceImport, normalizeSource, sourceSummary, exportSources,
   getKey as sourceKey, mergeSources,
@@ -163,8 +163,18 @@ const WEBVIEW_DIR = path.join(CACHE_DIR, "webview");
 const TOC_DIR = path.join(CACHE_DIR, "toc");
 const CONTENT_DIR = path.join(CACHE_DIR, "content");
 const EXPLORE_DIR = path.join(CACHE_DIR, "explore");
+/**
+ * 发现页「书列表」缓存（点某个榜单/标签后返回的那一批书）。
+ *
+ * 为什么单独放一个目录、不和 EXPLORE_DIR 混：
+ *   EXPLORE_DIR 是 legado ACache 的移植（key = md5(书源url + exploreUrl)，
+ *   文件名 = Java hashCode），放的是**分类**，且要能被 legado 直接拷贝复用。
+ *   这里放的是分类**点进去之后的书列表**，legado 没有对应物，所以另开目录，
+ *   避免污染 ACache 的兼容性。
+ */
+const EXPLORE_BOOKS_DIR = path.join(CACHE_DIR, "explore-books");
 const LOGIN_STATE_PATH = path.join(CACHE_DIR, "login-state.json");
-for (const d of [CACHE_DIR, WEBVIEW_DIR, TOC_DIR, CONTENT_DIR, EXPLORE_DIR]) {
+for (const d of [CACHE_DIR, WEBVIEW_DIR, TOC_DIR, CONTENT_DIR, EXPLORE_DIR, EXPLORE_BOOKS_DIR]) {
   try { fs.mkdirSync(d, { recursive: true }); } catch {}
 }
 
@@ -896,6 +906,30 @@ function loadSources() {
   try {
     const parsed = parseSourceImport(raw);
     sources = parsed.sources.map((s) => normalizeSource(s));
+    /**
+     * 老数据自动迁移到「限制该书源（防封禁）」总开关。
+     *
+     * 历史上「防封禁」拆成了三个字段，其中只有 noExport 有界面：
+     *   · 速读谷这类源被手工标了 noExport=true + noShelfWarm=true，
+     *     但 concurrencyLimit 是新字段（那时还没有），所以是 0。
+     * 这里做一次性补齐：只要旧标记里有一个为真，就认为用户本意是「限制该书源」，
+     * 于是把 limited 置真、并发补到 3。已经是 limited 的不动。
+     *
+     * 只改内存里的对象，等下一次 persistSources() 自然落盘；
+     * 这样不会在只读启动时写用户的源文件。
+     */
+    let migrated = 0;
+    for (const s of sources) {
+      if (s.limited === true) continue;
+      if (s.noExport === true || s.noShelfWarm === true || s.noPrewarm === true) {
+        s.limited = true;
+        s.noExport = true;
+        s.noShelfWarm = true;
+        if (!(Number(s.concurrencyLimit) > 0)) s.concurrencyLimit = 3;
+        migrated++;
+      }
+    }
+    if (migrated) console.log(`已把 ${migrated} 个书源的旧「防封禁」标记迁移到「限制该书源」`);
     if (parsed.skipped.length) console.log(`书源导入跳过 ${parsed.skipped.length} 条`);
   } catch (e) {
     console.error("书源加载失败:", e.message);
@@ -1828,6 +1862,7 @@ async function cacheStorageInfo() {
     { key: "content", label: "正文缓存", dir: CONTENT_DIR, keep: false },
     { key: "toc", label: "目录缓存", dir: TOC_DIR, keep: false },
     { key: "explore", label: "发现分类缓存", dir: EXPLORE_DIR, keep: false },
+    { key: "exploreBooks", label: "发现页书列表缓存", dir: EXPLORE_BOOKS_DIR, keep: false },
     { key: "webview", label: "登录 WebView 数据（含可清理缓存）", dir: WEBVIEW_DIR, keep: true },
   ];
   const items = [];
@@ -2113,6 +2148,555 @@ function clearContentCache() {
     .then(() => fs.promises.mkdir(CONTENT_DIR, { recursive: true }))
     .catch(() => {});
 }
+
+/* ---- 发现页「书列表」缓存（本进程独有，legado 无对应物） ----
+ *
+ * 背景：发现页的分类（榜单/标签）有 ACache 兜着，但**点进去之后的书列表完全没有缓存**。
+ * 实测同一个框连点 4 次：3469 / 3004 / 2500 / 1668ms —— 每次都重新打源站，
+ * 翻回上一页、返回再进、重复点都白等一轮。
+ *
+ * 这里按「书源 + 目标URL + 页码」缓存整批书，TTL 5 分钟（用户选定的方案 B）：
+ *   · 命中直接返回，不再调度 worker（省掉整条 JS 求值 + 网络往返）；
+ *   · 超时自动回源，不需要用户手动刷新；
+ *   · 5 分钟对榜单/标签这种低频变化的内容足够，又不会让用户看到隔夜数据。
+ *
+ * 落盘而不是只放内存：重启后第一次点还是热的（和目录/正文缓存一致）。
+ * 内存层用 LRU 限制条数，磁盘层由「清理缓存」统一回收。
+ */
+const exploreBooksMem = new Map();   // key -> { at, books, meta }
+/**
+ * 新鲜期：这段时间内直接返回缓存，不做任何后台动作。
+ *
+ * 超期后**不阻塞用户**，改为 stale-while-revalidate：
+ *   先把上次结果立刻返回（stale=true），同时在后台悄悄重抓，
+ *   抓完更新缓存，下次点击就是新的。
+ *
+ * 这样「5 分钟之后第一次点还要干等 1-3 秒」这件事就不存在了 ——
+ * 用户永远是秒开，内容由后台追平。与书架快照（listBooksWithMeta）同一套语义。
+ */
+const EXPLORE_BOOKS_TTL = 5 * 60 * 1000;
+/** 过期多久之后彻底不认（太旧的数据没有参考价值，宁可让用户等一下） */
+const EXPLORE_BOOKS_MAX_AGE = 24 * 60 * 60 * 1000;
+const EXPLORE_BOOKS_MEM_MAX = 200;
+/**
+ * 失败短缓存（负缓存）TTL。
+ *
+ * 背景：光遇这类源站挂在 Cloudflare 后面时，源站宕机不会立刻报错，而是等
+ * Cloudflare 自己的源站超时（实测约 20s）才回一个 522。用户点一次书架干等 20 秒，
+ * 再点一次还是 20 秒 —— 源站一直没恢复，就一直在等同一个必然失败的请求。
+ *
+ * 这里把「明确的源站故障」短记 60 秒：窗口内再点同一个入口直接秒回错误提示，
+ * 不再排队等 20 秒。60 秒后自动重试，源站恢复了马上就能用，不需要用户手动做什么。
+ *
+ * 只对「网络层失败」记负缓存（5xx / 超时 / 连接错误）；「返回成功但没有书」
+ * 不记（那可能是正常的空分类，记了会挡住真实数据）。
+ */
+const EXPLORE_FAIL_TTL = 60 * 1000;
+
+/** 文件名前缀 = md5(书源)，便于「按书源整批删」时前缀匹配 */
+function exploreBooksOriginHash(origin) {
+  return crypto.createHash("md5").update(String(origin || "")).digest("hex").slice(0, 16);
+}
+/**
+ * 缓存 key 必须带上筛选条件（infoMap）指纹。
+ *
+ * 光遇这类书源的 exploreUrl 脚本会把筛选条件拼进 kind.url（URL 本身就变了），
+ * 但**规则型书源**的 infoMap 是单独传给 worker 的、不出现在 URL 里。
+ * 只按 URL 缓存的话，「玄幻 + 字数不限」和「玄幻 + 50万字以上」会互相串味。
+ */
+function exploreBooksHash(origin, target, page, infoMap) {
+  let imKey = "";
+  try { imKey = infoMap && typeof infoMap === "object" ? JSON.stringify(infoMap) : ""; } catch { imKey = ""; }
+  const body = crypto.createHash("md5")
+    .update(okey(origin, target) + "|page=" + String(Number(page) || 1) + "|im=" + imKey)
+    .digest("hex").slice(0, 24);
+  return exploreBooksOriginHash(origin) + "-" + body;
+}
+function exploreBooksFile(origin, target, page, infoMap) {
+  return path.join(EXPLORE_BOOKS_DIR, exploreBooksHash(origin, target, page, infoMap) + ".json");
+}
+/**
+ * 读发现页书列表缓存。
+ *
+ * @returns {{ rec: object, stale: boolean } | null}
+ *   rec   = 缓存记录 { at, books, meta }
+ *   stale = true 表示已过新鲜期（调用方应先返回、再后台重抓）
+ *   返回 null 表示没有可用缓存（从没抓过，或已超过 MAX_AGE）
+ */
+function readExploreBooksCache(origin, target, page, infoMap) {
+  const k = exploreBooksHash(origin, target, page, infoMap);
+  const ageOf = (rec) => Date.now() - (rec && rec.at ? rec.at : 0);
+  const usable = (rec) => Array.isArray(rec && rec.books) && rec.books.length && ageOf(rec) < EXPLORE_BOOKS_MAX_AGE;
+
+  const hit = lruTouch(exploreBooksMem, k);
+  if (hit) return usable(hit) ? { rec: hit, stale: ageOf(hit) >= EXPLORE_BOOKS_TTL } : null;
+  try {
+    const j = JSON.parse(fs.readFileSync(exploreBooksFile(origin, target, page, infoMap), "utf8"));
+    if (usable(j)) {
+      lruSet(exploreBooksMem, k, j, EXPLORE_BOOKS_MEM_MAX);
+      return { rec: j, stale: ageOf(j) >= EXPLORE_BOOKS_TTL };
+    }
+  } catch {}
+  return null;
+}
+function writeExploreBooksCache(origin, target, page, infoMap, books, meta) {
+  if (!Array.isArray(books) || !books.length) return;
+  const rec = { at: Date.now(), books, meta: meta || null };
+  lruSet(exploreBooksMem, exploreBooksHash(origin, target, page, infoMap), rec, EXPLORE_BOOKS_MEM_MAX);
+  fs.promises.writeFile(exploreBooksFile(origin, target, page, infoMap), JSON.stringify(rec), "utf8").catch(() => {});
+}
+
+/**
+ * 后台重抓（stale-while-revalidate 的 revalidate 部分）。
+ *
+ * 用 inflight 去重：同一个 key 只允许一个后台请求在飞，
+ * 用户连点几次不会打出多个并发请求（对速读谷这类有风控的站点尤其重要）。
+ * 失败静默丢弃 —— 后台刷新不该弹错打扰用户，旧数据继续用，
+ * 真正的失败提示留给用户「主动点开且没有缓存」那条路径。
+ */
+const exploreBooksRevalidating = new Set();
+
+function revalidateExploreBooks(origin, target, page, infoMap, sourceName) {
+  const key = exploreBooksHash(origin, target, page, infoMap);
+  if (exploreBooksRevalidating.has(key)) return;
+  exploreBooksRevalidating.add(key);
+  const timeout = (config.online && config.online.searchTimeout) || 60000;
+  getPool().request("explore", { sourceUrl: origin, url: target, page, infoMap }, { timeout })
+    .then((r) => {
+      const books = (r && r.result && r.result.books) || [];
+      if (books.length) {
+        writeExploreBooksCache(origin, target, page, infoMap, books, (r.result && r.result.meta) || null);
+      } else if (exploreLooksFailed(books, r.result && r.result.meta)) {
+        writeExploreFail(origin, target, page, infoMap, r.result.meta && r.result.meta.status, "");
+      }
+    })
+    .catch((e) => {
+      if (sourceName) console.error(`发现页后台刷新失败（${sourceName}）:`, (e && e.message) || e);
+    })
+    .finally(() => { exploreBooksRevalidating.delete(key); });
+}
+
+/**
+ * 失败短缓存：key 与书列表缓存同一套（书源+URL+页码+筛选），
+ * 只放内存（重启即忘，不落盘 —— 失败不该跨重启留下痕迹）。
+ */
+const exploreFailMem = new Map();    // key -> { at, status, message }
+
+function exploreFailKey(origin, target, page, infoMap) {
+  return exploreBooksHash(origin, target, page, infoMap);
+}
+function readExploreFail(origin, target, page, infoMap) {
+  const k = exploreFailKey(origin, target, page, infoMap);
+  const hit = exploreFailMem.get(k);
+  if (!hit) return null;
+  if (Date.now() - (hit.at || 0) > EXPLORE_FAIL_TTL) { exploreFailMem.delete(k); return null; }
+  return hit;
+}
+function writeExploreFail(origin, target, page, infoMap, status, message) {
+  exploreFailMem.set(exploreFailKey(origin, target, page, infoMap), {
+    at: Date.now(), status: Number(status) || 0, message: String(message || ""),
+  });
+  // 简单的上限保护：避免长时间运行后条目无限增长
+  while (exploreFailMem.size > EXPLORE_BOOKS_MEM_MAX) exploreFailMem.delete(exploreFailMem.keys().next().value);
+}
+
+/** 判断一次 explore 结果是否属于「源站故障」（用于负缓存），见 EXPLORE_FAIL_TTL 注释 */
+function exploreLooksFailed(books, meta) {
+  if (Array.isArray(books) && books.length) return false;
+  /**
+   * 判据：5xx，或 status=0（连不上 / 被重置）。
+   *
+   * status 的来源是 `web-book.mjs` 的 `Number(res.code) || 0`，
+   * 即「连不上源站」会被归一成 0，和「HTTP 200 但规则没匹配到书」不同 —— 后者 status 是 200。
+   *
+   * 唯一要防的误判是**没有 meta**（正常书源返回空分类时不写 meta）：
+   * 那种情况下不能当故障，否则会把正常的空分类记 60 秒负缓存。
+   */
+  const raw = meta && meta.status;
+  if (raw === null || raw === undefined || raw === "") return false;   // 没有 meta = 正常空结果
+  const st = Number(raw);
+  return Number.isFinite(st) && (st >= 500 || st === 0);
+}
+
+/** 源站故障时的用户可读提示 */
+function exploreFailMessage(status) {
+  const st = Number(status) || 0;
+  if (st >= 500) return `书源站点暂时不可用（HTTP ${st}），请稍后再试`;
+  return "书源站点暂时无法访问，请稍后再试";
+}
+
+/* ---- 发现页后台预热（只预热「排行榜 / 热门标签」两组） ----
+ *
+ * 为什么不全量预热：光遇聚合有 303 个内容入口，一次全打等于瞬间对上游
+ * （番茄/七猫等）发起 303 次查询 —— 本项目已经有过一次真实教训：
+ * 目录悬停预取放大请求量，直接把速读谷 IP 打到风控。所以这里：
+ *   1) 只预热用户指定的两组（排行榜 + 热门标签），共约 34 项；
+ *   2) 按 PREWARM_RATE_PER_SEC 限速（当前 5 项/秒），实际吞吐受 worker 数限制；
+ *   3) 已缓存（且未过期）的项直接跳过，不重复打源站；
+ *   4) 一轮跑完就停，不做定时轮询；用户点「刷新发现」才会再来一轮。
+ *
+ * 判定「排行榜 / 热门标签」用的是分组头文字：书源把这些板块标题写成
+ * 整行项（layout_flexBasisPercent >= 1），后面跟着的普通 chip 就属于该组。
+ */
+const PREWARM_GROUPS = ['排行榜', '热门标签'];
+/**
+ * 预热速率上限（项/秒）。
+ *
+ * ⚠ 这是**目标速率**，不是实际速率：实际吞吐 = 可用 worker 数 / 单项耗时。
+ * 实测单项约 2.3 秒、4 个 worker 里还要留 1 个给用户点击，
+ * 所以真实上限只有约 1.3 项/秒 —— 设 5 也不会超发。
+ *
+ * 意义在于：worker 少的时候它不拖后腿；将来把书源并发数调大（设置里可改），
+ * 吞吐会自然涨到这个上限，不会再被「固定 1 秒间隔」人为卡住。
+ *
+ * 风控真正的保险是**worker 数**（同时最多 N 个请求在飞），不是这个间隔。
+ */
+const PREWARM_RATE_PER_SEC = 5;
+/** 相邻两次「派发」之间的最小间隔（按目标速率换算，避免瞬间打出一串） */
+const PREWARM_GAP_MS = Math.max(0, Math.round(1000 / PREWARM_RATE_PER_SEC));
+/**
+ * 拿不到空闲 worker 时最多等多久（毫秒）。
+ *
+ * 并发预热时「同批其它项正占着 worker」是常态，不该立刻判失败；
+ * 等满这个时长还拿不到，才认定用户确实在占用（或池太小），记为失败并跳过。
+ * 取 5 秒：约等于两项的抓取时间，够等到一轮释放，又不会让进度条卡住。
+ */
+const PREWARM_SLOT_WAIT_MS = 5000;
+/** 单轮预热的硬上限，避免书源结构异常时打出几百个请求 */
+const PREWARM_MAX_ITEMS = 60;
+/**
+ * 统一的「后台预热」进度注册表。
+ *
+ * 为什么统一：预热有三处 —— 最近阅读正文、书架正文、发现页分类。
+ * 用户关心的是「后台在忙什么、还要多久」，不该分三个地方看。
+ * 这里按 id 登记，`/api/online/pool` 的 `prewarm` 字段一次性全部返回，
+ * 前端 ⚡ 按钮渲染成进度条。
+ *
+ * 每条记录形如：
+ *   { id, kind, label, total, done, skipped, failed, current, startedAt, finishedAt }
+ * kind 取值：'reading'（最近阅读）/ 'shelf'（书架）/ 'explore'（发现页）
+ */
+const prewarmTasks = new Map();
+
+/**
+ * 最近一次成功打开过发现页的书源（key -> { infoMap, at }）。
+ *
+ * 为什么需要记住：用户点「清缓存」时，发现页的 34 项缓存全被删掉，
+ * 必须重新预热。但清缓存接口本身不带书源信息，而用户此刻可能已经切走了面板。
+ * 记住最近打开过的那个书源，清缓存后就能自动接着预热它 ——
+ * 不用等用户再手动打开一次发现页。
+ *
+ * 只保留最近若干个（避免长期运行后无限增长），并且只认最近的（10 分钟内打开过），
+ * 太久没碰的不主动打源站。
+ */
+const recentExploreSources = new Map();   // sourceKey -> { infoMap, at }
+const RECENT_EXPLORE_TTL = 10 * 60 * 1000;
+const RECENT_EXPLORE_MAX = 5;
+
+function rememberExploreSource(sourceKey, infoMap) {
+  const key = String(sourceKey || '');
+  if (!key) return;
+  recentExploreSources.delete(key);        // 重新插入到末尾（最近使用）
+  recentExploreSources.set(key, {
+    infoMap: (infoMap && typeof infoMap === 'object') ? infoMap : null,
+    at: Date.now(),
+  });
+  while (recentExploreSources.size > RECENT_EXPLORE_MAX) {
+    recentExploreSources.delete(recentExploreSources.keys().next().value);
+  }
+}
+
+/** 取最近打开过的、还在 TTL 内的发现页书源（最近的优先） */
+function recentExploreSourceList() {
+  const now = Date.now();
+  const out = [];
+  for (const [key, v] of [...recentExploreSources].reverse()) {
+    if (now - (v.at || 0) > RECENT_EXPLORE_TTL) continue;
+    if (!sourceMap.has(key)) continue;      // 书源已被删掉就跳过
+    out.push({ sourceKey: key, infoMap: v.infoMap });
+  }
+  return out;
+}
+
+/**
+ * 登记一个预热任务，返回一个「进度句柄」给调用方更新。
+ *
+ * 同一个 id 重复登记视为「已经在跑」——调用方应先查 `prewarmTasks.has(id)`，
+ * 避免重复打源站（发现页预热就是靠这个去重的）。
+ */
+function prewarmBegin(id, { kind, label, total }) {
+  const task = {
+    id: String(id),
+    kind: String(kind || 'other'),
+    label: String(label || ''),
+    total: Math.max(0, Number(total) || 0),
+    done: 0, skipped: 0, failed: 0,
+    current: null,
+    startedAt: Date.now(),
+    finishedAt: 0,
+  };
+  prewarmTasks.set(task.id, task);
+  return task;
+}
+
+function prewarmEnd(task) {
+  if (!task) return;
+  task.finishedAt = Date.now();
+  task.current = null;
+  /**
+   * 完成后**不立刻删**，保留 8 秒再清。
+   *
+   * 原因：预热常常在几秒内跑完（例如书架全部命中本地缓存），
+   * 前端 2 秒轮询一次可能完全看不到这条记录，用户以为「什么都没发生」。
+   * 留一小段尾巴让进度条能走到 100%，比凭空消失更可信。
+   */
+  setTimeout(() => {
+    const cur = prewarmTasks.get(task.id);
+    if (cur === task) prewarmTasks.delete(task.id);
+  }, 8000).unref?.();
+}
+
+/**
+ * 某个 id 是否**正在跑**（区别于「刚跑完、还在显示尾巴」）。
+ *
+ * 为什么不能用 `prewarmTasks.has(id)` 判重：`prewarmEnd` 会把完成的任务
+ * 多留 8 秒供前端展示，这期间 `has()` 仍为 true。若拿它当「已在跑」的判据，
+ * 用户在完成后的 8 秒内点「清缓存」或重开发现页，预热会被误判成「已在跑」
+ * 而直接跳过 —— 表现为「清了缓存但一直没重新预热」。
+ */
+function prewarmRunning(id) {
+  const t = prewarmTasks.get(String(id));
+  return !!t && !t.finishedAt;
+}
+
+/**
+ * 立刻清掉某个 id 的记录（含展示尾巴）。
+ *
+ * 清缓存后要马上重跑预热时用：不能让上一条的尾巴挡住新一轮。
+ */
+function prewarmDrop(id) {
+  prewarmTasks.delete(String(id));
+}
+
+/** 组装预热进度快照（给 /api/online/pool 用） */
+function prewarmStatus() {
+  const now = Date.now();
+  const out = [];
+  for (const t of prewarmTasks.values()) {
+    const processed = t.done + t.skipped + t.failed;
+    const finished = t.finishedAt > 0;
+    const elapsedMs = (finished ? t.finishedAt : now) - t.startedAt;
+    out.push({
+      id: t.id,
+      kind: t.kind,
+      label: t.label,
+      total: t.total,
+      done: t.done,
+      skipped: t.skipped,
+      failed: t.failed,
+      processed,
+      percent: t.total ? Math.min(100, Math.round((processed / t.total) * 100)) : (finished ? 100 : 0),
+      current: t.current || null,
+      startedAt: t.startedAt,
+      elapsedMs,
+      finished,
+      /**
+       * 粗略预估剩余时间：按「已处理项的平均耗时」推剩余项。
+       *
+       * 样本太少时不要外推 —— 只处理 1 项就外推会把「第一项特别快」
+       * 放大成「剩余 0 秒」这种明显错的数字。
+       * 少于 3 项时用「目标速率」做保守估计：并发预热时按 1 项/秒估
+       * （即 PREWARM_GAP_MS 在旧串行模型下的值），比按 5 项/秒估更保守，
+       * 不会给用户「马上就好」的错觉。
+       */
+      etaMs: (() => {
+        if (finished || processed >= t.total) return 0;
+        if (processed < 3) return Math.round((t.total - processed) * 1000);
+        const per = elapsedMs / processed;
+        return Math.max(0, Math.round(per * (t.total - processed)));
+      })(),
+    });
+  }
+  // 在跑的排前面，其余按开始时间倒序
+  out.sort((a, b) => (a.finished === b.finished ? b.startedAt - a.startedAt : (a.finished ? 1 : -1)));
+  return out;
+}
+
+/** 判断一个 kind 是否是「整行分组头」（书源用 basis>=1 表示独占一行） */
+function exploreKindIsSectionHead(k) {
+  const st = (k && k.style && typeof k.style === 'object') ? k.style : {};
+  const b = Number(st.layout_flexBasisPercent);
+  return Number.isFinite(b) && b >= 1;
+}
+
+/**
+ * 从分类列表里挑出「排行榜 / 热门标签」两组下的内容项。
+ * @returns {Array<{title:string,url:string}>}
+ */
+function pickPrewarmKinds(kinds) {
+  const out = [];
+  let inWanted = false;
+  for (const k of kinds || []) {
+    if (!k) continue;
+    const title = String(k.title == null ? '' : k.title);
+    if (exploreKindIsSectionHead(k)) {
+      // 分组头本身没有可抓的内容，只用来切换「当前属于哪一组」
+      inWanted = PREWARM_GROUPS.some((g) => title.includes(g));
+      continue;
+    }
+    if (!inWanted) continue;
+    const url = String(k.url == null ? '' : k.url);
+    if (!url || /^java\./.test(url)) continue;   // 纯副作用项（登录/弹窗）不预热
+    out.push({ title, url });
+    if (out.length >= PREWARM_MAX_ITEMS) break;
+  }
+  return out;
+}
+
+/**
+ * 后台预热发现页。
+ *
+ * @param {string} sourceKey 书源 key
+ * @param {Array} kinds      分类列表（通常是刚拿到的 /explore/kinds 结果）
+ * @param {object|null} infoMap 当前筛选条件（线路/频道/平台/字数/更新/排序）。
+ *   必须和用户点击时用的一致 —— 缓存 key 带 infoMap 指纹，
+ *   用 null 预热的话，用户带筛选点开时 key 对不上，等于白预热。
+ */
+function warmExploreKinds(sourceKey, kinds, infoMap) {
+  const key = String(sourceKey || '');
+  const taskId = 'explore:' + key;
+  if (!key || prewarmRunning(taskId)) return;   // 同一书源只允许一轮在跑（不含展示尾巴）
+  const source = sourceMap.get(key);
+  if (!source || source.noPrewarm === true) return;
+  const targets = pickPrewarmKinds(kinds);
+  if (!targets.length) return;
+  // 归一化：kinds 接口回传的 infoMap 可能是 {}，与用户点击时传的对象保持同一形态
+  const im = (infoMap && typeof infoMap === 'object' && Object.keys(infoMap).length) ? infoMap : null;
+  /**
+   * 避开「用户点击会用的那个 worker」。
+   *
+   * 发现页请求按书源固定 worker（exploreSlotIndex）。worker 的任务是同步阻塞的，
+   * 一个 worker 同时只跑一个任务、后来的排队 —— 预热如果占着那个 worker，
+   * 用户点框就得排在预热后面，预热反而把界面拖慢了。
+   *
+   * 这里改用一个**空闲且不是固定 worker** 的 worker 去抓：
+   * 缓存本身写在主进程（exploreBooksMem / EXPLORE_BOOKS_DIR），
+   * 所以预热在哪个 worker 抓都无所谓，用户点击照样命中缓存。
+   * 没有空闲 worker 就跳过这一项（用户优先，宁可少预热）。
+   */
+  const pool = getPool();
+  // 用与 book-pool 同一套哈希算出「用户点击会落到哪个 worker」，预热避开它
+  const userSlotIdx = pool.slots && pool.slots.length ? exploreSlotIndex(key, pool.slots.length) : -1;
+  const prog = prewarmBegin(taskId, {
+    kind: 'explore',
+    label: '发现页 ' + (source.bookSourceName || key),
+    total: targets.length,
+  });
+  setImmediate(async () => {
+    try {
+      /**
+       * 按目标速率派发（PREWARM_RATE_PER_SEC），能并发就并发。
+       *
+       * 关键约束：**同时最多只占 pool.size - 1 个 worker**，永远留一个给用户点击。
+       * 所以实际吞吐由 worker 数决定（4 worker ≈ 1.3 项/秒），
+       * 设更高的速率不会超发 —— 拿不到空闲 worker 就先等，下一轮再试。
+       *
+       * 这里用「在飞集合 + 等待任一完成」的模型，而不是无脑 Promise.all：
+       * Promise.all 会把 34 项一次性全排进 worker 队列，等于绕过了限速。
+       */
+      const timeout = (config.online && config.online.searchTimeout) || 60000;
+      const maxInFlight = Math.max(1, (pool.size || 4) - 1);
+      let idx = 0;
+      const inflight = new Set();
+
+      const fetchOne = async (t) => {
+        // 已缓存且还新鲜 → 跳过，不重复打源站
+        const hit = readExploreBooksCache(key, t.url, 1, im);
+        if (hit && !hit.stale) { prog.skipped++; return; }
+        /**
+         * 取一个空闲 worker（且避开用户点击会用的那个）。
+         *
+         * 拿不到时**短暂等待再试**，而不是直接记失败 ——
+         * 并发模型下「没有空闲 worker」是正常现象（同批还有别的项在跑），
+         * 立刻记失败会让进度条显示一堆假失败。
+         * 只有连续等满 PREWARM_SLOT_WAIT_MS 还拿不到，才认为用户确实在占用。
+         */
+        let slot = pool.pickIdleSlot ? pool.pickIdleSlot(userSlotIdx) : null;
+        const deadline = Date.now() + PREWARM_SLOT_WAIT_MS;
+        while (!slot && Date.now() < deadline) {
+          await new Promise((res) => setTimeout(res, 100));
+          slot = pool.pickIdleSlot ? pool.pickIdleSlot(userSlotIdx) : null;
+        }
+        if (!slot) { prog.failed++; return; }
+        prog.current = t.title;
+        try {
+          const r = await pool.request("explore", { sourceUrl: key, url: t.url, page: 1, infoMap: im }, { timeout, slot });
+          const books = (r && r.result && r.result.books) || [];
+          if (books.length) {
+            writeExploreBooksCache(key, t.url, 1, im, books, (r.result && r.result.meta) || null);
+            prog.done++;
+          } else {
+            prog.failed++;
+          }
+        } catch (e) {
+          prog.failed++;
+        }
+      };
+
+      while (idx < targets.length || inflight.size) {
+        // 尽量填满在飞槽位（受 maxInFlight 与目标速率共同限制）
+        while (idx < targets.length && inflight.size < maxInFlight) {
+          const t = targets[idx++];
+          const p = fetchOne(t).finally(() => inflight.delete(p));
+          inflight.add(p);
+          if (PREWARM_GAP_MS > 0) await new Promise((res) => setTimeout(res, PREWARM_GAP_MS));
+        }
+        if (inflight.size) await Promise.race(inflight);
+      }
+      console.log(`发现页预热完成（${source.bookSourceName || key}）：新抓 ${prog.done}，已缓存 ${prog.skipped}，失败 ${prog.failed}`);
+    } catch (e) {
+      console.error('发现页预热异常:', (e && e.message) || e);
+    } finally {
+      prewarmEnd(prog);
+    }
+  });
+}
+
+/** 清某个书源的全部发现页书列表缓存（书源被改/删、用户点刷新时用） */
+function dropExploreBooksCache(origin) {
+  const prefix = exploreBooksOriginHash(origin) + "-";
+  for (const k of [...exploreBooksMem.keys()]) if (k.startsWith(prefix)) exploreBooksMem.delete(k);
+  fs.promises.readdir(EXPLORE_BOOKS_DIR).then((names) => Promise.all(
+    names.filter((n) => n.startsWith(prefix)).map((n) => fs.promises.rm(path.join(EXPLORE_BOOKS_DIR, n), { force: true })),
+  )).catch(() => {});
+}
+
+/**
+ * 清缓存之后重新预热发现页。
+ *
+ * 分类缓存刚被清掉，所以先走一次 exploreKinds 拿到最新分类（这一步同时会把
+ * 分类写回 ACache），再交给 warmExploreKinds 挑出「排行榜 + 热门标签」两组去预热。
+ *
+ * 失败只记日志：清缓存本身已经成功返回了，预热是锦上添花，不该反过来影响用户。
+ */
+async function reWarmExploreAfterClear(sourceKey, infoMap) {
+  const source = sourceMap.get(sourceKey);
+  if (!source) return;
+  if (source.noPrewarm === true) return;
+  const timeout = (config.online && config.online.searchTimeout) || 60000;
+  const r = await getPool().request("exploreKinds", { sourceUrl: sourceKey, infoMap }, { timeout: Math.min(timeout, 30000) });
+  const kinds = (r && r.result && r.result.kinds) || [];
+  if (!kinds.length) return;
+  warmExploreKinds(sourceKey, kinds, (r.result && r.result.infoMap) || infoMap);
+}
+
+function clearExploreBooksCache() {
+  exploreBooksMem.clear();
+  return fs.promises.rm(EXPLORE_BOOKS_DIR, { recursive: true, force: true })
+    .then(() => fs.promises.mkdir(EXPLORE_BOOKS_DIR, { recursive: true }))
+    .catch(() => {});
+}
+
 /**
  * 正文读取入口：先读持久缓存，未命中再调度 worker。
  * refresh=1 与 legado 阅读菜单「刷新」一致，强制回源并覆盖缓存。
@@ -2170,7 +2754,12 @@ async function warmOnlineContent(book, index) {
  */
 function shouldSkipBackgroundWarm(book) {
   const source = sourceMap.get(book && book.origin);
-  return !source || source.noPrewarm === true;
+  /**
+   * limited（「限制该书源（防封禁）」）等同于最严格的 noPrewarm：
+   * 连「最近阅读」那一本的少量预热也跳过。
+   * 因为用户勾它的意图就是「这个站很危险，别主动打它」。
+   */
+  return !source || source.noPrewarm === true || source.limited === true;
 }
 
 /**
@@ -2185,7 +2774,7 @@ function shouldSkipBackgroundWarm(book) {
  */
 function shouldSkipShelfWarm(book) {
   const source = sourceMap.get(book && book.origin);
-  return !source || source.noPrewarm === true || source.noShelfWarm === true;
+  return !source || source.noPrewarm === true || source.noShelfWarm === true || source.limited === true;
 }
 
 /**
@@ -2235,9 +2824,20 @@ async function warmRecentOnlineReading() {
     const before = start - step;
     if (before >= 0) order.push(before);
   }
-  for (const i of order) {
-    const r = await warmOnlineContent(book, i);
-    if (!r.ok) break;
+  const prog = prewarmBegin('reading', {
+    kind: 'reading',
+    label: '最近阅读 ' + (book.name || ''),
+    total: order.length,
+  });
+  try {
+    for (const i of order) {
+      prog.current = '第 ' + (i + 1) + ' 章';
+      const r = await warmOnlineContent(book, i);
+      if (r && r.cached) prog.skipped++; else if (r && r.ok) prog.done++; else prog.failed++;
+      if (!r.ok) break;
+    }
+  } finally {
+    prewarmEnd(prog);
   }
   return true;
 }
@@ -2257,33 +2857,46 @@ async function warmOnlineShelfBooks() {
     .map((b) => ({ book: b, progress: progress[okey(b.origin, b.bookUrl)] || {} }))
     .sort((a, b) => (Number(b.progress.at) || 0) - (Number(a.progress.at) || 0));
 
-  let done = 0;
-  for (const { book, progress: p } of rows) {
-    const start = Math.max(0, Number(p.chapter) || 0);
-    const knownTotal = Number(book.totalChapterNum) || 0;
-    // 当前章前后各 WARM_RADIUS 章（先往后再往前），与最近阅读预热保持一致。
-    // 用局部函数拼顺序，避免和 warmRecentOnlineReading 里的同名逻辑各写一份。
-    const order = [];
-    for (let step = 1; step <= WARM_RADIUS; step++) {
-      const after = start + step;
-      if (knownTotal > 0 ? after < knownTotal : true) order.push(after);
+  if (!rows.length) return;
+  // 进度以「本」为单位（用户视角：书架里 13 本书预热到第几本了）
+  const prog = prewarmBegin('shelf', {
+    kind: 'shelf',
+    label: '书架正文',
+    total: rows.length,
+  });
+  try {
+    for (const { book, progress: p } of rows) {
+      const start = Math.max(0, Number(p.chapter) || 0);
+      const knownTotal = Number(book.totalChapterNum) || 0;
+      // 当前章前后各 WARM_RADIUS 章（先往后再往前），与最近阅读预热保持一致。
+      // 用局部函数拼顺序，避免和 warmRecentOnlineReading 里的同名逻辑各写一份。
+      const order = [];
+      for (let step = 1; step <= WARM_RADIUS; step++) {
+        const after = start + step;
+        if (knownTotal > 0 ? after < knownTotal : true) order.push(after);
+      }
+      order.push(start);
+      for (let step = 1; step <= WARM_RADIUS; step++) {
+        const before = start - step;
+        if (before >= 0) order.push(before);
+      }
+      prog.current = book.name || '';
+      let fetched = false;
+      let ok = true;
+      for (const i of order) {
+        const r = await warmOnlineContent(book, i);
+        if (!r.ok) { ok = false; break; }
+        if (!r.cached) fetched = true;
+      }
+      // done 记「处理完的本数」（跳过/失败都算处理过，否则进度条永远走不满）
+      if (ok) prog.done++; else prog.failed++;
+      // 只有真的回源过才稍微歇一下；全部命中本地缓存时不需要额外等待。
+      if (fetched) await new Promise((resolve) => setTimeout(resolve, 150));
     }
-    order.push(start);
-    for (let step = 1; step <= WARM_RADIUS; step++) {
-      const before = start - step;
-      if (before >= 0) order.push(before);
-    }
-    let fetched = false;
-    for (const i of order) {
-      const r = await warmOnlineContent(book, i);
-      if (!r.ok) break;
-      if (!r.cached) fetched = true;
-    }
-    done++;
-    // 只有真的回源过才稍微歇一下；全部命中本地缓存时不需要额外等待。
-    if (fetched) await new Promise((resolve) => setTimeout(resolve, 150));
+    console.log(`书架正文预热完成：${prog.done}/${rows.length} 本`);
+  } finally {
+    prewarmEnd(prog);
   }
-  if (rows.length) console.log(`书架正文预热完成：${done}/${rows.length} 本`);
 }
 
 /* ============================ legado API 兼容层 ============================ */
@@ -3041,6 +3654,25 @@ const server = http.createServer(async (req, res) => {
       const s = sourceMap.get(url);
       if (!s) return send(res, 404, { error: "书源不存在" });
       const patch = body.patch && typeof body.patch === "object" ? body.patch : {};
+      /**
+       * 「限制该书源（防封禁）」是一个总开关，展开成三个具体标记。
+       *
+       * 为什么在后端展开而不是前端各写一遍：
+       *   · 三个字段必须**同进同出**（勾上一起来、取消一起清），
+       *     前端漏写一个就会留下「已解除限制但并发仍是 3」这种半残状态；
+       *   · 后端展开后，任何调用方（前端、脚本、将来的 CLI）语义都一致。
+       *
+       * 展开规则：
+       *   limited=true  → noExport=true, noShelfWarm=true, concurrencyLimit=3
+       *   limited=false → 三个一起清空（concurrencyLimit=0 表示不限制）
+       * 同时仍兼容直接改 noExport / noShelfWarm / concurrencyLimit 的老调用方式。
+       */
+      if (Object.prototype.hasOwnProperty.call(patch, "limited")) {
+        const on = patch.limited === true;
+        patch.noExport = on;
+        patch.noShelfWarm = on;
+        patch.concurrencyLimit = on ? 3 : 0;
+      }
       const next = normalizeSource({ ...s, ...patch, bookSourceUrl: s.bookSourceUrl });
       const i = sources.indexOf(s);
       sources[i] = next;
@@ -3113,7 +3745,19 @@ const server = http.createServer(async (req, res) => {
       const infoMap = exploreInfoFromQuery(u);
       try {
         const r = await getPool().request("exploreKinds", { sourceUrl: getSKey(s), infoMap }, { timeout: 30000 });
-        return send(res, 200, { ok: true, kinds: r.result.kinds || [], infoMap: r.result.infoMap || null, actions: r.result.actions || [] });
+        const kinds = r.result.kinds || [];
+        /**
+         * 打开发现页时，后台慢速预热「排行榜 + 热门标签」两组（见 warmExploreKinds）。
+         * 不 await：分类渲染不该等预热。同书源重复打开只跑一轮（prewarmTasks 去重）。
+         *
+         * infoMap 用 worker 回传的那份（脚本执行后会写回当前线路/频道/平台等），
+         * 保证预热的缓存 key 与用户随后点击时用的 key 一致。
+         */
+        const effInfoMap = r.result.infoMap || infoMap;
+        // 记住这个书源：清缓存后要自动重新预热它（见 recentExploreSources 注释）
+        rememberExploreSource(getSKey(s), effInfoMap);
+        warmExploreKinds(getSKey(s), kinds, effInfoMap);
+        return send(res, 200, { ok: true, kinds, infoMap: r.result.infoMap || null, actions: r.result.actions || [] });
       } catch (e) {
         return send(res, 200, { ok: false, error: e.message, code: e.code, kinds: [] });
       }
@@ -3130,6 +3774,8 @@ const server = http.createServer(async (req, res) => {
       const s = sourceMap.get(String(body.source || ""));
       if (!s) return send(res, 404, { error: "书源不存在" });
       await clearExploreKindCacheEverywhere(getSKey(s));
+      // 用户点「刷新发现」时，分类和书列表都要重来，否则分类变了、点进去还是旧列表。
+      dropExploreBooksCache(getSKey(s));
       try {
         const r = await getPool().request("exploreKinds", {
           sourceUrl: getSKey(s), infoMap: body.infoMap || null,
@@ -3189,21 +3835,77 @@ const server = http.createServer(async (req, res) => {
       let target = u.searchParams.get("url") || "";
       let page = Number(u.searchParams.get("page")) || 1;
       let infoMap = exploreInfoFromQuery(u);
+      let forceRefresh = u.searchParams.get("refresh") === "1";
       if (req.method === "POST") {
         const body = await readBody(req);
         url = String(body.source == null ? url : body.source);
         target = String(body.url == null ? target : body.url);
         if (Number(body.page)) page = Number(body.page);
         if (body.infoMap && typeof body.infoMap === "object") infoMap = body.infoMap;
+        if (body.refresh === true) forceRefresh = true;
       }
       const s = sourceMap.get(url);
       if (!s) return send(res, 404, { error: "书源不存在" });
+      /**
+       * 发现页书列表缓存（stale-while-revalidate，见 readExploreBooksCache 注释）。
+       *
+       * refresh=1 时跳过缓存强制回源，语义与 legado 的「刷新」一致。
+       * 只缓存**成功且有书**的结果：源站 502 / 返回空列表都不落盘，
+       * 否则一次故障会在 5 分钟内持续放大成「点了没反应」。
+       *
+       * 5 分钟内 = 直接返回；超过 5 分钟 = 先返回旧数据 + 后台重抓，
+       * 用户不会因为「缓存过期」而重新等待。
+       */
+      if (!forceRefresh) {
+        const hit = readExploreBooksCache(getSKey(s), target, page, infoMap);
+        if (hit) {
+          // 已过新鲜期：先把上次结果秒回，后台悄悄重抓（不阻塞用户）
+          if (hit.stale) revalidateExploreBooks(getSKey(s), target, page, infoMap, s.bookSourceName);
+          return send(res, 200, {
+            ok: true,
+            books: hit.rec.books,
+            respondTime: 0,
+            sourceName: s.bookSourceName,
+            actions: [],
+            meta: hit.rec.meta || null,
+            cached: true,
+            stale: hit.stale,
+          });
+        }
+        // 刚失败过（60 秒内）就直接秒回，不再排队等一次必然失败的 20 秒请求。
+        const fail = readExploreFail(getSKey(s), target, page, infoMap);
+        if (fail) {
+          return send(res, 200, {
+            ok: false,
+            error: exploreFailMessage(fail.status),
+            code: "SOURCE_DOWN",
+            books: [],
+            actions: [],
+            meta: { status: fail.status, cachedFailure: true },
+          });
+        }
+      }
       try {
         const r = await getPool().request("explore", { sourceUrl: getSKey(s), url: target, page, infoMap },
           { timeout: config.online.searchTimeout || 60000 });
+        const books = r.result.books || [];
+        if (books.length) {
+          writeExploreBooksCache(getSKey(s), target, page, infoMap, books, r.result.meta || null);
+        } else if (exploreLooksFailed(books, r.result.meta)) {
+          // 源站 5xx / 连不上：记 60 秒负缓存，并如实告诉用户是源站的问题
+          writeExploreFail(getSKey(s), target, page, infoMap, r.result.meta && r.result.meta.status, "");
+          return send(res, 200, {
+            ok: false,
+            error: exploreFailMessage(r.result.meta && r.result.meta.status),
+            code: "SOURCE_DOWN",
+            books: [],
+            actions: r.result.actions || [],
+            meta: r.result.meta || null,
+          });
+        }
         return send(res, 200, {
           ok: true,
-          books: r.result.books || [],
+          books,
           respondTime: r.result.respondTime,
           sourceName: s.bookSourceName,
           actions: r.result.actions || [],
@@ -4476,12 +5178,19 @@ async function fetchTocForBook(origin, bookUrl, timeout) {
           ok: true, size: applied, netSlots: pool.netSlots,
           busy: pool.slots.filter((s) => s.busy).length,
           sources: enabledSources().length,
+          prewarm: prewarmStatus(),
         });
       }
       return send(res, 200, {
         size: pool.size, netSlots: pool.netSlots,
         busy: pool.slots.filter((s) => s.busy).length,
         sources: enabledSources().length,
+        /**
+         * 发现页预热进度（在跑的时候才有内容）。
+         * 前端可以用它显示「正在预热 12/34（约 45 秒）」，
+         * 或者只在调试面板里看，不影响任何主流程。
+         */
+        prewarm: prewarmStatus(),
       });
     }
 
@@ -4541,12 +5250,35 @@ async function fetchTocForBook(origin, bookUrl, timeout) {
       // legado ConfigViewModel.clearCache → BookHelp.clearCache() + 删除 cacheDir，
       // ACache('explore') 随之失效，所以这里必须一起清掉发现分类缓存。
       await clearExploreKindCacheEverywhere();
+      // 发现页书列表缓存也属于「阅读缓存」，一并清掉（否则清完缓存点榜单还是旧数据）。
+      await clearExploreBooksCache();
+      /**
+       * 发现页也要重新预热 —— 清缓存把分类和 34 项书列表都删了，
+       * 不重跑的话用户再打开发现页，前 34 项又得一项项等。
+       *
+       * 只预热「最近 10 分钟内打开过发现页」的书源（recentExploreSources），
+       * 太久没碰的不主动打源站。分类需要重新求值，所以这里先走一次 kinds，
+       * 拿到最新分类后再交给 warmExploreKinds（它会按分组挑出要预热的那两组）。
+       */
+      const recentExplore = recentExploreSourceList();
+      for (const { sourceKey } of recentExplore) {
+        // 清掉上一轮的展示尾巴，否则新一轮会被误判成「已在跑」而跳过
+        prewarmDrop('explore:' + sourceKey);
+      }
       // 用户已经明确点了「清理缓存」，这里和启动预热一样在后台重建当前章/下一章。
       // 不阻塞清理接口返回；如果用户马上打开书，同章节的 contentInflight 会复用在飞请求。
       setImmediate(() => {
         warmRecentOnlineReading()
           .catch((e) => console.error("预热最近阅读失败:", e && e.message))
-          .finally(() => warmOnlineShelfBooks().catch((e) => console.error("预热书架失败:", e && e.message)));
+          .finally(() => warmOnlineShelfBooks().catch((e) => console.error("预热书架失败:", e && e.message)))
+          .finally(() => {
+            // 正文预热跑完再轮到发现页，避免两拨请求同时压源站
+            for (const { sourceKey, infoMap: im } of recentExplore) {
+              reWarmExploreAfterClear(sourceKey, im).catch((e) => {
+                console.error(`发现页预热失败（${sourceKey}）:`, (e && e.message) || e);
+              });
+            }
+          });
       });
       const after = await dirStats(CACHE_DIR);
       return send(res, 200, {
@@ -4670,8 +5402,43 @@ async function fetchTocForBook(origin, bookUrl, timeout) {
       const s = sourceMap.get(String(body.source || ""));
       if (!s) return send(res, 404, { error: "书源不存在" });
       const raw = String(body.url || body.loginUrl || s.loginUrl || "").trim();
-      if (!/^https?:/i.test(raw) && !raw) return send(res, 400, { error: "缺少要打开的地址" });
-      const target = /^https?:/i.test(raw) ? raw : new URL(raw, new URL(String(s.bookSourceUrl).split(",{")[0])).toString();
+      if (!raw) return send(res, 400, { error: "缺少要打开的地址" });
+      /**
+       * 解析要打开的地址。三种形态都要支持：
+       *   1) 绝对地址 http(s)://…        → 直接用
+       *   2) data: / about: 等内联文档   → 直接用（书源的「切换线路 / 书源设置 / 段评设置」
+       *      会把整页 HTML 编码成 data:text/html;base64,… 交给 java.startBrowser）
+       *   3) 相对路径（如 /register）     → 需要基址
+       *
+       * 基址不能取 bookSourceUrl：光遇聚合这类书源的 bookSourceUrl 是字面量「光遇聚合」
+       * 而不是网址（legado 允许这样写，真正的域名放在书源变量的「线路」里）。
+       * 旧实现 `new URL(raw, new URL(s.bookSourceUrl))` 会直接抛 Invalid URL，
+       * 表现就是「内置浏览器打开其他项失败」。
+       * 这里按 legado NetworkUtils.getAbsoluteURL 的语义，依次尝试：
+       *   书源变量的「线路」→ 云端配置 hosts[0] → bookSourceUrl（真的是网址时）→ 报错。
+       */
+      const isAbsolute = /^[a-z][a-z0-9+.-]*:/i.test(raw);
+      let target = raw;
+      if (!isAbsolute) {
+        const bases = [];
+        try {
+          const info = await getPool().request("loginInfo", { sourceUrl: getSKey(s) }, { timeout: 30000 });
+          const vars = (info.result && info.result.sourceVariables) || null;
+          if (vars && vars["线路"]) bases.push(String(vars["线路"]));
+          const cloud = vars && vars["云端配置"];
+          if (cloud && Array.isArray(cloud.hosts) && cloud.hosts.length) bases.push(String(cloud.hosts[0]));
+        } catch { /* 变量取不到就用下面的兜底 */ }
+        bases.push(String(s.bookSourceUrl || ""));
+        let resolved = null;
+        for (const b of bases) {
+          if (!b || !/^https?:/i.test(b)) continue;
+          try { resolved = new URL(raw, b).toString(); break; } catch { /* 换下一个基址 */ }
+        }
+        if (!resolved) {
+          return send(res, 400, { error: "无法解析相对地址（书源没有可用的站点地址）：" + raw });
+        }
+        target = resolved;
+      }
       let headerMap = {};
       try {
         const info = await getPool().request("loginInfo", { sourceUrl: getSKey(s) }, { timeout: 30000 });
@@ -4812,6 +5579,18 @@ async function fetchTocForBook(origin, bookUrl, timeout) {
       return send(res, 200, {
         app: "Reader",
         dataDir: __dirname,
+        /**
+         * 真正的数据目录。
+         *
+         * dataDir 是「程序目录」（exe 同级 / server.mjs 所在目录），只说明装在哪；
+         * 缓存、登录态、WebView profile 全部落在 cacheDir 下，而 cacheDir 可以被
+         * READER_CACHE_DIR 或配置里的 online.cacheDir 改到别处。
+         *
+         * 「是否同一个实例」必须按 cacheDir 判断，不能只看 dataDir：
+         * 否则用户用不同的 READER_CACHE_DIR 开两个进程（想同时开两份）时，
+         * 第二个会被误判成「已在运行」而直接退出。
+         */
+        cacheDir: CACHE_DIR,
         sea: isSea(),
         port: activePort,
         pid: process.pid,
@@ -4876,7 +5655,20 @@ function probeSameInstance(port) {
       r.on("end", () => {
         try {
           const j = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-          resolve(!!(j && j.app === "Reader" && j.dataDir === __dirname));
+          if (!j || j.app !== "Reader") return resolve(false);
+          /**
+           * 判据 = 数据目录（cacheDir）一致，而不是程序目录。
+           *
+           * 这样才支持「同一份程序开多个实例」：只要 READER_CACHE_DIR
+           * （或配置里的 online.cacheDir）指向不同目录，就是两个独立实例，
+           * 各自用各自的缓存 / 登录态 / WebView profile，互不干扰。
+           *
+           * 兼容旧版：旧版 /api/instance 没有 cacheDir 字段，
+           * 此时退回比较 dataDir（旧行为）。
+           */
+          const sameCache = j.cacheDir ? path.resolve(j.cacheDir) === path.resolve(CACHE_DIR) : null;
+          if (sameCache !== null) return resolve(sameCache);
+          resolve(j.dataDir === __dirname);
         } catch { resolve(false); }
       });
     });

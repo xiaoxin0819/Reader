@@ -93,51 +93,193 @@ function saveSettings() {
   }).catch(() => {});
 }
 
-function renderFontSelect() {
-  const sel = $("setFamily");
-  if (!sel) return;
-  const fixed = [...sel.querySelectorAll("option")].filter((o) => !o.dataset.custom).map((o) => ({ v: o.value, t: o.textContent }));
-  if (!fixed.length) return;                       // 已经重建过，保留现有固定项
-  sel.innerHTML = "";
-  fixed.forEach((o) => {
-    const op = document.createElement("option");
-    op.value = o.v; op.textContent = o.t;
-    sel.appendChild(op);
-  });
-  (state.fonts || []).forEach((f) => {
-    const op = document.createElement("option");
-    op.value = CUSTOM_PREFIX + f.id;
-    op.textContent = "自定义：" + f.name;
-    op.dataset.custom = "1";
-    sel.appendChild(op);
-  });
+/** 内置字体（不可删除）。顺序即下拉里的显示顺序。 */
+const BUILTIN_FONT_LABELS = {
+  serif: "宋体 / 衬线",
+  song: "思源宋体",
+  kai: "楷体",
+  hei: "黑体",
+};
+
+/**
+ * 字体菜单的预设最大高度（px）。
+ *
+ * 字体再多，菜单也只占这么高，超出部分靠滚动查看 —— 避免导入几十个字体后
+ * 菜单无限往下延伸、把整屏占满。与 style.css 里 .fp-menu 的 max-height 保持一致；
+ * 定位时若窗口剩余空间更小，还会进一步收窄（见 positionFontPicker）。
+ */
+const FP_MENU_MAX_H = 260;
+
+/**
+ * 字体选择器：一个按钮 + 浮层列表，替代原来的「原生 <select> + 独立字体列表」两块。
+ *
+ * 与原生 <select> 的区别：
+ *   1) 每一项用它**自己对应的字体**渲染（原生 option 在 Windows 上普遍忽略 font-family）；
+ *   2) 自定义字体那几项右侧带 ✕，点了直接删；内置字体没有 ✕。
+ *
+ * 渲染是幂等的：每次调用都按当前 state.fonts / state.settings.fontFamily 重建，
+ * 所以导入 / 删除字体后直接再调一次即可。
+ */
+function renderFontPicker() {
+  const btn = $("fontPickerBtn");
+  const menu = $("fontPickerMenu");
+  const cur = $("fontPickerCur");
+  if (!btn || !menu || !cur) return;
+
+  const key = state.settings.fontFamily || "serif";
+  // 顶部按钮显示当前字体名，并用该字体渲染自己
+  cur.textContent = fontLabelOf(key);
+  cur.style.fontFamily = resolveFont(key);
+
+  menu.innerHTML = "";
+  // 内置字体
+  for (const k of Object.keys(BUILTIN_FONT_LABELS)) {
+    menu.appendChild(fontPickerItem({ value: k, label: BUILTIN_FONT_LABELS[k], deletable: false, active: key === k }));
+  }
+  // 内置与自定义之间加分隔线：列表长了以后能一眼看出「下面这些是可删的」
+  if ((state.fonts || []).length) {
+    const sep = document.createElement("div");
+    sep.className = "fp-sep";
+    menu.appendChild(sep);
+  }
+  // 自定义字体
+  for (const f of state.fonts || []) {
+    menu.appendChild(fontPickerItem({
+      value: CUSTOM_PREFIX + f.id,
+      label: f.name,
+      deletable: true,
+      active: key === CUSTOM_PREFIX + f.id,
+      font: '"rz-' + f.id + '",serif',
+      id: f.id,
+    }));
+  }
 }
 
-function renderFontList() {
-  const box = $("fontList");
-  if (!box) return;
-  box.innerHTML = "";
-  if (!(state.fonts || []).length) {
-    box.innerHTML = '<div class="font-empty">还没有自定义字体，点上面按钮导入 .ttf / .otf / .woff2</div>';
-    return;
+/** 取某个 fontFamily 值对应的显示名 */
+function fontLabelOf(key) {
+  if (key && key.startsWith(CUSTOM_PREFIX)) {
+    const id = key.slice(CUSTOM_PREFIX.length);
+    const f = (state.fonts || []).find((x) => x.id === id);
+    if (f) return f.name;
   }
-  state.fonts.forEach((f) => {
-    const row = document.createElement("div");
-    row.className = "font-row";
-    row.innerHTML = '<span class="fname" style="font-family:\'rz-' + f.id + '\',serif">' + esc(f.name) +
-      '</span><button class="font-del" title="删除该字体">删除</button>';
-    row.querySelector(".font-del").onclick = async () => {
-      const r = await api("/api/fonts/remove", {
-        method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: f.id })
-      });
-      state.fonts = r.fonts || [];
-      if (r.settings) { state.settings = { ...state.settings, ...r.settings }; }
-      loadCustomFonts(); renderFontSelect(); renderFontList(); applySettings(); syncSettingsUI();
-      toast("已删除字体：" + f.name);
-    };
-    box.appendChild(row);
-  });
+  return BUILTIN_FONT_LABELS[key] || BUILTIN_FONT_LABELS.serif;
+}
+
+/** 造一行字体选项 */
+function fontPickerItem({ value, label, deletable, active, font, id }) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = "fp-item" + (active ? " on" : "");
+  item.dataset.value = value;
+  item.setAttribute("role", "option");
+  item.setAttribute("aria-selected", active ? "true" : "false");
+  const name = document.createElement("span");
+  name.className = "fp-name";
+  name.textContent = label;
+  name.style.fontFamily = font || resolveFont(value);   // 用该字体渲染自己
+  item.appendChild(name);
+  if (deletable) {
+    const del = document.createElement("span");
+    del.className = "fp-del";
+    del.title = "删除该字体";
+    del.textContent = "✕";
+    del.onclick = (e) => { e.stopPropagation(); removeCustomFont(id, label); };
+    item.appendChild(del);
+  }
+  item.onclick = () => {
+    state.settings.fontFamily = value;
+    applySettings();
+    saveSettings();
+    closeFontPicker();
+    renderFontPicker();
+  };
+  return item;
+}
+
+/**
+ * 把菜单摆到按钮正下方（或上方，空间不够时）。
+ *
+ * 菜单是 position:fixed 且挂在 body 下，所以要自己算坐标。
+ * 优先向下展开；下方放不下就向上翻 —— 字体块常在设置面板底部，
+ * 只做向下展开的话在窗口不高时仍会被视口切掉。
+ */
+function positionFontPicker() {
+  const menu = $("fontPickerMenu"), btn = $("fontPickerBtn");
+  if (!menu || !btn || menu.classList.contains("hidden")) return;
+  const r = btn.getBoundingClientRect();
+  const gap = 4;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  // 先按内容测高（此刻菜单已可见，max-height 已生效）
+  const mh = menu.offsetHeight || 0;
+  const below = vh - r.bottom - gap;
+  const above = r.top - gap;
+  const openUp = below < Math.min(mh, 160) && above > below;
+  const maxH = Math.max(120, Math.floor(openUp ? above : below));
+  menu.style.maxHeight = Math.min(FP_MENU_MAX_H, maxH) + "px";
+  menu.style.left = Math.round(r.left) + "px";
+  menu.style.width = Math.round(r.width) + "px";
+  menu.style.top = openUp
+    ? Math.round(r.top - gap - Math.min(mh, maxH)) + "px"
+    : Math.round(r.bottom + gap) + "px";
+}
+
+/**
+ * 把当前选中的那一项滚进可视区。
+ *
+ * 字体多到需要滚动时，当前字体可能在列表很靠下的位置 ——
+ * 打开菜单后如果还停在顶部，用户得自己往下翻才能看到「当前用的是哪个」。
+ * 这里用 scrollIntoView({block:'nearest'})：已在可视区内就不动，避免无谓跳动。
+ */
+function revealCurrentFontItem() {
+  const menu = $("fontPickerMenu");
+  if (!menu) return;
+  const active = menu.querySelector(".fp-item.on");
+  if (!active) return;
+  try { active.scrollIntoView({ block: "nearest" }); }
+  catch { /* 老浏览器没有 options 参数，忽略即可 */ }
+}
+
+function openFontPicker() {
+  const menu = $("fontPickerMenu"), btn = $("fontPickerBtn");
+  if (!menu || !btn) return;
+  renderFontPicker();
+  menu.classList.remove("hidden");
+  btn.setAttribute("aria-expanded", "true");
+  positionFontPicker();
+  revealCurrentFontItem();
+  // 面板内部滚动 / 窗口缩放时菜单要跟着按钮走（否则会飘在原地）
+  window.addEventListener("resize", positionFontPicker);
+  const scroller = document.querySelector("#modalSettings .settings-body");
+  if (scroller) scroller.addEventListener("scroll", positionFontPicker, { passive: true });
+}
+function closeFontPicker() {
+  const menu = $("fontPickerMenu"), btn = $("fontPickerBtn");
+  if (menu) menu.classList.add("hidden");
+  if (btn) btn.setAttribute("aria-expanded", "false");
+  window.removeEventListener("resize", positionFontPicker);
+  const scroller = document.querySelector("#modalSettings .settings-body");
+  if (scroller) scroller.removeEventListener("scroll", positionFontPicker);
+}
+function toggleFontPicker() {
+  const menu = $("fontPickerMenu");
+  if (!menu) return;
+  if (menu.classList.contains("hidden")) openFontPicker(); else closeFontPicker();
+}
+
+/** 删除一个自定义字体（内置字体走不到这里） */
+async function removeCustomFont(id, name) {
+  const r = await api("/api/fonts/remove", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  }).catch((e) => ({ error: e.message }));
+  if (!r || r.error) return toast("删除失败：" + ((r && r.error) || "未知错误"));
+  state.fonts = r.fonts || [];
+  // 后端会把「正在用这个字体」的设置回退到默认字体，这里跟着同步
+  if (r.settings) state.settings = { ...state.settings, ...r.settings };
+  loadCustomFonts();
+  applySettings();
+  renderFontPicker();
+  toast("已删除字体：" + name);
 }
 
 function syncSettingsUI() {
@@ -147,10 +289,14 @@ function syncSettingsUI() {
   $("setIndent").value = s.indent; $("vIndent").textContent = s.indent + "em";
   $("setLetter").value = s.letterSpacing; $("vLetter").textContent = s.letterSpacing;
   $("setMaxWidth").value = s.maxWidth; $("vMaxWidth").textContent = s.maxWidth;
-  renderFontSelect();
-  $("setFamily").value = s.fontFamily;
-  const an = $("setAutoNext");
-  if (an) an.checked = state.settings.autoNext !== false;
+  renderFontPicker();
+  const autoOn = state.settings.autoNext !== false;
+  // 打开设置时顺带校正顶栏按钮显示，避免状态漂移
+  const ab = $("btnAutoNext");
+  if (ab) {
+    ab.classList.toggle("on", autoOn);
+    ab.title = autoOn ? "自动下一章：已开启（滚到章末自动翻）" : "自动下一章：已关闭（只能手动翻）";
+  }
   syncPoolSizeUI();
 }
 
@@ -185,7 +331,6 @@ async function loadState() {
   state.progress = st.progress || {};
   state.fonts = st.fonts || [];
   loadCustomFonts();
-  renderFontList();
   renderShelfSelect();
   applySettings(); syncSettingsUI();
   if (!state.shelves.length) { renderBooks(); return; }
@@ -428,10 +573,28 @@ function updateBookNav() {
   const onlyOne = list.length <= 1;
   const atFirst = i <= 0;
   const atLast = i === list.length - 1;
+  /**
+   * 顶栏按钮（btnPrevBook / btnNextBook）现在翻的是**章**，所以禁用状态按章算；
+   * 底部按钮（btnPrev / btnNext）翻的是**本**，仍按书算。
+   * 两者语义不同，不能再用同一个 disPrev / disNext。
+   */
+  const chIdx = Number(state.chapterIdx) || 0;
+  const chTotal = Number(state.book && state.book.chapterCount) || 0;
+  const chDisPrev = !chTotal || chIdx <= 0;
+  const chDisNext = !chTotal || chIdx >= chTotal - 1;
+  const bp = $("btnPrevBook"), bn = $("btnNextBook");
+  /**
+   * tooltip 里的快捷键要和「键盘」段真正绑定的键一致。
+   *
+   * 翻章是 ← / →（也支持 PageUp / PageDown），见文件末尾的 keydown 处理器；
+   * Alt+←/→ 是**翻整本**（stepBook），不要写到这里 —— 顶栏按钮现在是翻章。
+   */
+  if (bp) { bp.disabled = chDisPrev; bp.title = chDisPrev ? "已是第一章" : "上一章（← / PageUp）"; }
+  if (bn) { bn.disabled = chDisNext; bn.title = chDisNext ? "已是最后一章" : "下一章（→ / PageDown）"; }
   const disPrev = onlyOne || atFirst;
   const disNext = onlyOne || atLast;
-  ["btnPrevBook", "btnPrev"].forEach((id) => { const e = $(id); if (e) e.disabled = disPrev; });
-  ["btnNextBook", "btnNext"].forEach((id) => { const e = $(id); if (e) e.disabled = disNext; });
+  ["btnPrev"].forEach((id) => { const e = $(id); if (e) e.disabled = disPrev; });
+  ["btnNext"].forEach((id) => { const e = $(id); if (e) e.disabled = disNext; });
   const prvBtn = $("btnPrev");
   const nxtBtn = $("btnNext");
   const prv = i > 0 ? list[i - 1] : null;
@@ -933,8 +1096,23 @@ $("bookFilter").oninput = (e) => { state.filter = e.target.value; state.bookPage
 $("bookSort").onchange = (e) => { state.sort = e.target.value; state.bookPage = 1; renderBooks(); };
 $("qnPrev").onclick = () => gotoChapter(state.chapterIdx - 1);
 $("qnNext").onclick = () => gotoChapter(state.chapterIdx + 1);
-$("btnPrevBook").onclick = () => stepBook(-1);
-$("btnNextBook").onclick = () => stepBook(1);
+/**
+ * 顶栏导航：翻章（不是翻书）。
+ *
+ * 为什么改语义：底部「上一章 / 下一章」（#qnPrev / #qnNext）已经是高频操作，
+ * 而顶栏这两个按钮原来翻的是「整本书」（stepBook），两处语义不一致很容易误点。
+ * 现在统一成翻章；翻整本仍可用底部保留的「上一本 / 下一本」入口。
+ *
+ * 没有打开书时退回原来的翻书行为（保持「先选一本开始读」的可用性）。
+ */
+$("btnPrevBook").onclick = () => {
+  if (state.book && (Number(state.book.chapterCount) || 0) > 0) return gotoChapter(state.chapterIdx - 1);
+  stepBook(-1);
+};
+$("btnNextBook").onclick = () => {
+  if (state.book && (Number(state.book.chapterCount) || 0) > 0) return gotoChapter(state.chapterIdx + 1);
+  stepBook(1);
+};
 $("btnPrev").onclick = () => stepBook(-1);
 $("btnNext").onclick = () => stepBook(1);
 $("btnTop").onclick = () => { $("content").scrollTop = 0; };
@@ -1244,7 +1422,7 @@ $("content").addEventListener("contextmenu", (e) => {
       label: document.body.classList.contains("immersive") ? "退出沉浸阅读" : "沉浸阅读",
       act: () => toggleImmersive()
     },
-    { label: "阅读设置", act: () => { syncSettingsUI(); renderFontList(); $("modalSettings").classList.remove("hidden"); } }
+    { label: "阅读设置", act: () => { syncSettingsUI(); renderFontPicker(); $("modalSettings").classList.remove("hidden"); } }
   ]);
 });
 
@@ -1273,9 +1451,13 @@ $("btnTheme").onclick = () => {
 };
 
 /* 设置面板 */
-$("btnSettings").onclick = () => { syncSettingsUI(); renderFontList(); $("modalSettings").classList.remove("hidden"); };
-$("setClose").onclick = () => $("modalSettings").classList.add("hidden");
-$("modalSettings").onclick = (e) => { if (e.target.id === "modalSettings") $("modalSettings").classList.add("hidden"); };
+$("btnSettings").onclick = () => { syncSettingsUI(); renderFontPicker(); $("modalSettings").classList.remove("hidden"); };
+/* 关闭设置面板时必须顺带收起字体菜单 —— 菜单挂在 body 下，
+   不跟着面板走，否则面板关了菜单还浮在屏幕上。 */
+$("setClose").onclick = () => { closeFontPicker(); $("modalSettings").classList.add("hidden"); };
+$("modalSettings").onclick = (e) => {
+  if (e.target.id === "modalSettings") { closeFontPicker(); $("modalSettings").classList.add("hidden"); }
+};
 
 const bindRange = (id, key, out, fmt) => {
   $(id).oninput = (e) => {
@@ -1290,10 +1472,25 @@ bindRange("setLineHeight", "lineHeight", "vLineHeight", (v) => Number(v).toFixed
 bindRange("setIndent", "indent", "vIndent", (v) => v + "em");
 bindRange("setLetter", "letterSpacing", "vLetter");
 bindRange("setMaxWidth", "maxWidth", "vMaxWidth");
-const autoNextEl = $("setAutoNext");
-if (autoNextEl) {
-  autoNextEl.onchange = () => { state.settings.autoNext = autoNextEl.checked; saveSettings(); };
+
+/**
+ * 自动下一章开关（顶栏按钮 #btnAutoNext 的唯一入口）。
+ *
+ * 状态源是 state.settings.autoNext；顶栏按钮用 .on 类表示开启。
+ * 设置面板里已无同名复选框（唯一入口就是这个顶栏按钮），故不再保留兼容分支。
+ */
+function setAutoNext(on) {
+  const v = on !== false;
+  state.settings.autoNext = v;
+  const btn = $("btnAutoNext");
+  if (btn) {
+    btn.classList.toggle("on", v);
+    btn.title = v ? "自动下一章：已开启（滚到章末自动翻）" : "自动下一章：已关闭（只能手动翻）";
+  }
+  saveSettings();
 }
+
+$("btnAutoNext").onclick = () => setAutoNext(state.settings.autoNext === false);
 
 /* 书源并发数：拖动时只更新显示，松手（change）才真正热改 worker 池，
    避免拖动过程中反复建 / 拆 worker。 */
@@ -1319,7 +1516,19 @@ if (poolEl) {
     }
   };
 }
-$("setFamily").onchange = (e) => { state.settings.fontFamily = e.target.value; applySettings(); saveSettings(); };
+/* 字体选择器：点按钮展开/收起；点外面或按 Esc 收起。
+   具体选项的点击/删除逻辑在 fontPickerItem() 里绑定。 */
+$("fontPickerBtn").onclick = (e) => { e.stopPropagation(); toggleFontPicker(); };
+document.addEventListener("click", (e) => {
+  const picker = $("fontPicker");
+  const menu = $("fontPickerMenu");
+  // 菜单挂在 body 下（不是 #fontPicker 的子节点），必须单独判断，
+  // 否则点菜单里的任何一项都会被这里当成「点外面」而先关掉菜单。
+  const inside = (picker && picker.contains(e.target)) || (menu && menu.contains(e.target));
+  if (!inside) closeFontPicker();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeFontPicker(); });
+
 $("btnAddFont").onclick = () => $("fontFile").click();
 $("fontFile").onchange = async (e) => {
   const file = e.target.files && e.target.files[0];
@@ -1345,7 +1554,8 @@ $("fontFile").onchange = async (e) => {
       state.settings.fontFamily = CUSTOM_PREFIX + last.id;
       applySettings(); saveSettings();
     }
-    renderFontSelect(); renderFontList(); syncSettingsUI();
+    renderFontPicker(); syncSettingsUI();
+    openFontPicker();     // 导入后自动展开，让用户立刻看到新字体并已选中
     toast("已添加字体：" + (last ? last.name : file.name));
   } catch (err) { toast("导入失败：" + err.message); }
 };
@@ -1554,3 +1764,4 @@ $("browseGo").onclick = () => loadBrowse($("browsePath").value.trim());
 /* 启动 */
 syncTocOrderBtn();
 loadState();
+

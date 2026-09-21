@@ -3806,8 +3806,15 @@ function renderSourceList() {
       + (s.group ? '<span class="src-group">' + esc(s.group) + "</span>" : "") + "</div>"
       + '<div class="src-sub">' + esc(String(s.url).slice(0, 60)) + (flags ? " · " + flags : "")
       + (s.respondTime ? " · " + s.respondTime + "ms" : "") + "</div></div>"
-      + '<label class="src-noexport" title="整本导出=连续几百次请求，部分站点会风控封 IP；勾选后该书源禁止导出 TXT 小说">'
-      + '<input type="checkbox" data-act="noexport"' + (s.noExport ? " checked" : "") + ">禁止导出 TXT 小说</label>"
+      /**
+       * 「限制该书源（防封禁）」：一个开关管三件事。
+       * 之前是分散的三个标记（noExport / noShelfWarm / 并发），只有第一个有界面，
+       * 另外两个只能改 JSON —— 用户根本看不到。现在合并成一个复选框。
+       *
+       * tooltip 只列三件事的名字，保持简短（详细解释放在项目文档里）。
+       */
+      + '<label class="src-noexport" title="禁止导出 / 预热 / 并发">'
+      + '<input type="checkbox" data-act="limited"' + (s.limited ? " checked" : "") + ">限制该书源（防封禁）</label>"
       + '<div class="src-btns">'
       // legado BookSourceAdapter.showMenu：menu_login 仅 source.hasLoginUrl 时可见
       // （!loginUrl.isNullOrBlank()），点击 startActivity<SourceLoginActivity>(key=bookSourceUrl)
@@ -3843,15 +3850,26 @@ function renderSourceList() {
           renderSourceList();
           toast("已删除");
         };
-      } else if (act === "noexport") {
+      } else if (act === "limited") {
+        /**
+         * 「限制该书源（防封禁）」：勾选/取消时**同时**写三个字段，一起生效或一起清掉。
+         * 后端 /api/sources/update 会按 limited 自动补齐另外两项，
+         * 这里只传 limited，避免前后端两处各写一套规则导致不一致。
+         */
         el.onchange = async () => {
           await api("/api/sources/update", {
             method: "POST", headers: { "content-type": "application/json" },
-            body: JSON.stringify({ url, patch: { noExport: el.checked } })
+            body: JSON.stringify({ url, patch: { limited: el.checked } })
           }).catch((e) => toast(e.message));
           const s = state.online.sources.find((x) => x.url === url);
-          if (s) s.noExport = el.checked;
-          toast(el.checked ? "已禁止该书源导出 TXT 小说" : "已允许该书源导出");
+          if (s) {
+            s.limited = el.checked;
+            s.noExport = el.checked;
+            s.concurrencyLimit = el.checked ? 3 : 0;
+          }
+          toast(el.checked
+            ? "已限制该书源：禁止导出 / 禁止预热 / 并发最多 3"
+            : "已解除限制：导出 / 预热 / 并发均恢复默认");
         };
       } else if (act === "login") {
         el.onclick = () => openSourceLogin(url);
@@ -4125,9 +4143,51 @@ async function applyExploreKindsResult(r, url) {
   if (r.infoMap && typeof r.infoMap === "object") state.online.exploreInfoMap[url] = r.infoMap;
   state.online.exploreKinds = r.kinds;
   await renderExploreKinds(r.kinds, url);
+  showExploreLoginHint(url, r.kinds);
   // 动态 exploreUrl 求值本身也可能调用 java.startBrowser()/open()/searchBook()。
   // legado 在解析分类时立即执行这些副作用；不能只渲染分类后把 actions 丢掉。
   await applyActions(r.actions || [], { origin: url });
+}
+
+/**
+ * 「这个书源需要先登录」的判定。
+ *
+ * 光遇聚合的 exploreUrl 脚本要先请求 /discovestyle 拿榜单，而该接口要求带 qttoken：
+ * 未登录时服务器返回 502，脚本的 try/catch 把异常吞掉，于是只剩「线路 / 类型 /
+ * 频道 / 平台 / 搜索关键词」这些筛选控件和两个登录按钮，一个内容入口都没有。
+ * 用户看到的就是「发现页只有 11 项」。
+ *
+ * 判定要同时满足两条，否则会误伤正常书源（实测 19 个启用书源里，正常书源的内容
+ * 入口数最少也有 3 个，不会为 0）：
+ *   ① 没有任何内容入口 —— url 非空且不是 java.* 动作
+ *   ② 至少有一个 java.* 登录动作 —— 说明书源自己提供了登录入口
+ * 免费看书 / 起点限免 的 url 是 {{ho}}/... 模板占位符，属于内容入口，不会被误判。
+ */
+function exploreNeedsLogin(kinds) {
+  const list = kinds || [];
+  if (!list.length) return false;
+  let content = 0;
+  let loginAction = 0;
+  for (const k of list) {
+    const u = String((k && k.url) || "");
+    if (!u) continue;
+    if (/java\.(startBrowser|startBrowserAwait|openUrl|showBrowser|reLoginView)/.test(u)) loginAction += 1;
+    else content += 1;
+  }
+  return content === 0 && loginAction > 0;
+}
+
+/** 未登录导致分类残缺时，在分类区顶部挂一条提示 + 登录入口（不遮挡筛选控件） */
+function showExploreLoginHint(url, kinds) {
+  const box = $("exploreKinds");
+  if (!box || !exploreNeedsLogin(kinds)) return;
+  const tip = document.createElement("div");
+  tip.className = "ek-need-login";
+  tip.innerHTML = "<span>该书源需要先登录，登录后才会显示完整榜单和分类</span>"
+    + '<button class="mini-btn ek-login-btn" type="button">登录</button>';
+  const btn = tip.querySelector("button");
+  if (btn) btn.onclick = () => { openSourceLogin(url); };
+  box.insertBefore(tip, box.firstChild);
 }
 
 /** ExploreAdapter：书源把整行分组头用全角空格撑满（如「　　　　　　 都市 　　　　　　」）。
@@ -4491,22 +4551,45 @@ async function applyActions(actions, ctx) {
 async function runExploreAction(url, k, im, title) {
   const btn = $("exploreKinds");
   btn.classList.add("busy");
+  // legado ExploreAdapter.evalButtonClick 的语义：脚本里的 java.refreshExplore()
+  // 会走 clearExploreKindsCache() → exploreKinds()，重算后的分类**必须重新渲染**，
+  // 因为选择分组/分类/字数这些下拉改的是「下一次拉取用哪套分类」——
+  // 控件本身也要跟着重绘（新结果里的 chars/default 可能不同）。
+  // 旧实现只在 r.kinds 非空时把 kinds 塞进 state，但没有重绘控件，
+  // 表现就是「下拉值变了、下面的分类还是旧的」。
+  const before = JSON.stringify(im);
   const r = await api("/api/online/explore/action", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ source: url, action: k.action, kind: k, infoMap: im, title })
   }).catch((e) => ({ ok: false, error: e.message }));
   btn.classList.remove("busy");
   if (!r) return;
-  if (r.infoMap && typeof r.infoMap === "object") state.online.exploreInfoMap[url] = r.infoMap;
+  if (r.infoMap && typeof r.infoMap === "object") {
+    // 合并而不是覆盖：后端只回传它自己写过的键，前端刚写入的当前值要保留，
+    // 否则重绘时下拉会跳回旧值（用户看到「选了又弹回去」）。
+    const merged = Object.assign({}, state.online.exploreInfoMap[url] || {}, im, r.infoMap);
+    state.online.exploreInfoMap[url] = merged;
+  }
   if (r.ok === false) { toast(String(r.error || "按钮执行失败").slice(0, 120)); return; }
   // RssJsExtensions.open 的五个分支（login / search / explore / sort / rss）在 runOpenAction 里分派；
   // SourceVerificationHelp.startBrowser → WebViewActivity 的等价物是站内真内核浏览器（openExternalUrl）。
   // 用 window.open 会跳去外部浏览器，与 legado 的「内置 WebView 里登录后 cookie 回写」语义不符。
   await applyActions(r.actions, { origin: url });
   // java.refreshExplore() → clearExploreKindsCache + exploreKinds()
-  if (r.refreshed && Array.isArray(r.kinds) && r.kinds.length) {
-    state.online.exploreKinds = r.kinds;
-    await renderExploreKinds(r.kinds, url);
+  // 刷新后必须整块重绘（控件 + 分类），否则用户看到的是「值变了、内容没变」。
+  if (r.refreshed) {
+    if (Array.isArray(r.kinds) && r.kinds.length) {
+      state.online.exploreKinds = r.kinds;
+      await renderExploreKinds(r.kinds, url);
+    } else {
+      // 后端刷新失败（源站 502 等）：退回到重新拉一次分类，保证界面与后端一致。
+      await loadExploreKinds();
+    }
+    return;
+  }
+  // 非刷新类 action（如搜索框的 setVariable）：只要后端改过 infoMap 就同步控件显示
+  if (JSON.stringify(state.online.exploreInfoMap[url] || {}) !== before && Array.isArray(state.online.exploreKinds) && state.online.exploreKinds.length) {
+    await renderExploreKinds(state.online.exploreKinds, url);
   }
 }
 
@@ -4572,9 +4655,24 @@ async function loadExploreBooks(url, page, title) {
   state.online.exploreTitle = title || state.online.exploreTitle || "";
   const hd = $("expResHead");
   if (hd) hd.textContent = state.online.exploreTitle || "发现";
-  // 需求 4：翻页时**保留上一页**，等新页拿到再整体替换（legado ExploreShowActivity 翻页原地刷，不闪）。
-  if (!box.querySelector(".res-row")) box.innerHTML = '<div class="hint">加载中…</div>';
-  else box.dataset.loading = "1";
+  /**
+   * 翻页保留上一页（legado ExploreShowActivity 原地刷、不闪），但**换分类时必须先清空**：
+   * 换分类是「另一批内容」，留着旧列表会让用户以为新分类已经加载完
+   * （截图里的现象：标题已是「科幻末世」，列表还挂着上一次的《凡骨》等）。
+   * 判据：标题变了，或 url 变了 → 视为换了内容源，先清空并显示加载中。
+   */
+  const titleChanged = hd ? hd.dataset.lastTitle !== state.online.exploreTitle : false;
+  const urlChanged = box.dataset.lastUrl !== String(url);
+  const isNewContent = titleChanged || urlChanged;
+  if (hd) hd.dataset.lastTitle = state.online.exploreTitle;
+  box.dataset.lastUrl = String(url);
+  if (isNewContent || !box.querySelector(".res-row")) {
+    // 换分类：立刻清空旧列表，避免残留上一次的内容
+    box.innerHTML = '<div class="hint">加载中…</div>';
+    box.scrollTop = 0;
+  } else {
+    box.dataset.loading = "1";
+  }
   const ld = $("expLoading"); if (ld) ld.classList.remove("hidden");
   const im = exploreInfoMap(src);
   // 用 POST 而不是 GET：番茄「我的书架」的分组 URL 内嵌整串 POST body（258 本可达
@@ -4584,7 +4682,18 @@ async function loadExploreBooks(url, page, title) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ source: src, url, page, infoMap: im }),
   }).catch(() => null);
-  if (seq !== exploreSeq) return;          // 又翻了一页：丢弃这次结果
+  /**
+   * 又翻了一页 / 又点了别的分类：丢弃这次结果。
+   *
+   * 注意这里必须**顺手收掉 loading**：被丢弃的这次请求已经把 #expLoading
+   * 显示出来了，直接 return 会让它一直挂在界面上，
+   * 表现为「内容已经加载完，顶部还留着『正在加载…』」。
+   * 只有当自己仍是最新请求时才由下面各分支负责隐藏。
+   */
+  if (seq !== exploreSeq) {
+    const ldStale = $("expLoading"); if (ldStale) ldStale.classList.add("hidden");
+    return;
+  }
   if (!r || r.ok === false) {
     if (!box.querySelector(".res-row")) { box.innerHTML = '<div class="hint">加载失败：' + esc((r && r.error) || "未知错误") + "</div>"; box.scrollTop = 0; }
     else toast("加载失败：" + ((r && r.error) || "未知错误"));
@@ -5203,6 +5312,103 @@ function askText(title, content, opts) {
     wrap.onclick = (e) => { if (e.target === wrap) done(); };
     wrap.querySelector(".txt-ok").focus();
   });
+}
+
+/**
+ * 后台预热进度面板（⚡ 按钮）。
+ *
+ * 三处预热统一显示（后端 prewarmStatus）：最近阅读 / 书架正文 / 发现页分类。
+ * 自动轮询（1 秒），不需要用户手动刷新；关掉就停。
+ *
+ * 为什么不再用 askText：那是静态只读文本框，用户得反复点按钮才能看到新数字。
+ * 进度条要的是持续更新。
+ */
+async function openPrewarmPanel() {
+  const wrap = document.createElement("div");
+  wrap.className = "ask-modal";
+  wrap.innerHTML = '<div class="ask-box pw-box">'
+    + '<div class="ask-title">后台预热</div>'
+    + '<div class="pw-body"></div>'
+    + '<div class="ask-foot"><button class="ghost-btn pw-close">关闭</button></div></div>';
+  document.body.appendChild(wrap);
+
+  const body = wrap.querySelector(".pw-body");
+  let timer = null;
+  let idleTicks = 0;
+  let stopped = false;
+
+  const escapeHtml = (s) => String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const secs = (ms) => {
+    const n = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+    return n >= 60 ? (Math.floor(n / 60) + " 分 " + (n % 60) + " 秒") : (n + " 秒");
+  };
+
+  const render = (r) => {
+    const pw = (r && Array.isArray(r.prewarm)) ? r.prewarm : [];
+    const head = '<div class="pw-sub" style="margin:0 0 12px">'
+      + '<span class="pw-cur">抓取池 ' + (r && r.size != null ? r.size : "?") + " 个 worker · 正在忙 "
+      + (r && r.busy != null ? r.busy : "?") + "</span>"
+      + '<span class="pw-stat">启用书源 ' + (r && r.sources != null ? r.sources : "?") + "</span></div>";
+    if (!pw.length) {
+      body.innerHTML = head + '<div class="pw-empty">当前没有在跑的后台任务</div>';
+      return;
+    }
+    body.innerHTML = head + pw.map((p) => {
+      const pct = Math.max(0, Math.min(100, Number(p.percent) || 0));
+      const cls = p.finished ? ((Number(p.failed) > 0 && Number(p.done) === 0) ? "failed" : "done") : "";
+      const stat = p.finished
+        ? "已完成"
+        : ("已用 " + secs(p.elapsedMs) + (p.etaMs ? " · 剩余约 " + secs(p.etaMs) : ""));
+      const detail = "已抓 " + (Number(p.done) || 0) + " · 已缓存 " + (Number(p.skipped) || 0)
+        + (Number(p.failed) ? " · 失败 " + p.failed : "");
+      return '<div class="pw-item">'
+        + '<div class="pw-top"><span class="pw-name">' + escapeHtml(p.label || p.id) + "</span>"
+        + '<span class="pw-pct">' + (Number(p.processed) || 0) + " / " + (Number(p.total) || 0)
+        + "（" + pct + "%）</span></div>"
+        + '<div class="pw-bar"><div class="pw-fill ' + cls + '" style="width:' + pct + '%"></div></div>'
+        + '<div class="pw-sub"><span class="pw-cur">'
+        + escapeHtml(p.current || detail) + "</span>"
+        + '<span class="pw-stat">' + escapeHtml(stat) + "</span></div></div>";
+    }).join("");
+  };
+
+  const tick = async () => {
+    if (stopped) return null;
+    const r = await api("/api/online/pool").catch(() => null);
+    if (stopped) return null;
+    if (!r) { body.innerHTML = '<div class="pw-empty">读取抓取池状态失败</div>'; return null; }
+    render(r);
+    return r;
+  };
+
+  const done = () => {
+    stopped = true;
+    if (timer) clearInterval(timer);
+    timer = null;
+    document.removeEventListener("keydown", onKey);
+    wrap.remove();
+  };
+  function onKey(e) { if (e.key === "Escape") done(); }
+
+  document.addEventListener("keydown", onKey);
+  wrap.querySelector(".pw-close").onclick = done;
+  wrap.onclick = (e) => { if (e.target === wrap) done(); };
+
+  const first = await tick();
+  // 一开始就没有任何任务在跑 → 不必开轮询
+  const running = (first && first.prewarm) ? first.prewarm.some((p) => !p.finished) : false;
+  if (!running) return;
+
+  timer = setInterval(async () => {
+    const r = await tick();
+    if (!r) return;
+    const anyRunning = (r.prewarm || []).some((p) => !p.finished);
+    if (anyRunning) { idleTicks = 0; return; }
+    // 全部结束后再多刷两次（后端会保留 8 秒尾巴），让用户看到 100%
+    idleTicks++;
+    if (idleTicks >= 3) { if (timer) clearInterval(timer); timer = null; }
+  }, 1000);
 }
 
 /* ============================================================
@@ -6293,16 +6499,7 @@ $("bookManage").onclick = openShelfManage;
 $("btnSources").onclick = openSources;
 $("btnExplore").onclick = openExplore;
 $("btnReplace").onclick = openReplace;
-$("btnPool").onclick = async () => {
-  const r = await api("/api/online/pool").catch(() => null);
-  if (!r) return toast("读取抓取池状态失败");
-  await askText("抓取池状态", [
-    "worker 数：" + r.size,
-    "网络槽位：" + r.netSlots,
-    "正在忙：" + r.busy,
-    "启用书源：" + r.sources,
-  ].join("\n"), { copy: false });
-};
+$("btnPool").onclick = () => { openPrewarmPanel(); };
 /* 需求 C3：换源 / 刷新挪到顶栏右侧（原来换源只藏在右键菜单和搜索结果行里，找不到） */
 $("btnRefresh").onclick = () => refreshCurrentChapter();
 $("btnChangeSource").onclick = () => {
@@ -6437,9 +6634,9 @@ $("storageClear").onclick = async () => {
   if (r && r.error) return toast("清理失败：" + r.error);
   chapterCache.clear();
   onlineTocCache.clear();
-  toast("缓存已清理"
-    + (r && r.freedBytes ? "，释放 " + storageBytes(r.freedBytes) : "")
-    + (r && r.warming ? "，正在后台预热书架" : ""));
+    toast("缓存已清理"
+      + (r && r.freedBytes ? "，释放 " + storageBytes(r.freedBytes) : "")
+      + (r && r.warming ? "，正在后台重新预热（点 ⚡ 看进度）" : ""));
   refreshStoragePanel();
 };
 $("storageWebviewClear").onclick = async () => {

@@ -138,28 +138,44 @@ function parseExploreKindsRule(ruleStr) {
 }
 
 /**
- * 「完整度」评分：带 url 的 kind（榜单 / 发现页入口）是源站正常的关键标志。
- * 光遇聚合 gyks.cf 整站 502 时，exploreUrl 脚本里的 try/catch 会吞掉异常，
- * 只吐出筛选框和几个按钮，第一批 url 入口（番茄榜单等）全部消失。
+ * 「完整度」评分。
+ *
+ * 为什么要两个维度：只比 url 数会把「换了分组」误判成「源站故障」——
+ * 七猫「📊 排行榜」只有 20 个榜单、「🏷️ 标签」只有 36 个标签，
+ * 而「🔄 动态分类」有 200+ 个，按 url 数比就会被旧的完整缓存挡住，
+ * 表现是「切换分组没反应」。所以真正判残的依据是**有没有内容入口**，
+ * 而不是「比上次多还是少」。
  */
 function kindScore(kinds) {
   let urls = 0;
-  for (const k of kinds || []) if (k && k.url) urls += 1;
-  return { urls: urls, total: (kinds && kinds.length) || 0 };
+  let content = 0;
+  for (const k of kinds || []) {
+    if (!k || !k.url) continue;
+    urls += 1;
+    // 内容入口：url 不是纯 java.* 副作用（登录/弹窗这类不算内容）
+    if (!/java\.(startBrowser|startBrowserAwait|openUrl|showBrowser|reLoginView)/.test(String(k.url))) content += 1;
+  }
+  return { urls, content, total: (kinds && kinds.length) || 0 };
 }
 
 /**
- * 只在两份分类里挑更完整的那份。
- * 先比 url 入口数（榜单有 / 没有是质变），再比总数（筛选框变少也是残缺）。
- * 源站正常时分类是增多的，新结果胜出；源站故障时保留旧缓存，不至于越刷越空。
+ * 在两份分类里挑「更可用」的那份。
+ *
+ * 旧实现按「url 数多的胜出」，会把分组切换的结果误挡掉（见 kindScore 注释）。
+ * 现在的判据（对齐 legado「有内容就用」的语义，只额外挡住真正的故障）：
+ *   1) 新结果一个内容入口都没有、旧的却有 → 判定源站故障，保留旧的
+ *   2) 其余情况一律采用新结果 —— 包括「内容比上次少」，因为那可能只是换了分组/筛选
+ *
+ * 这样既保住了「光遇 502 时只剩筛选框」的保护，又不会挡住七猫的分组切换。
  */
 function keepBetterKinds(staleKinds, freshKinds) {
   if (!staleKinds || !staleKinds.length) return freshKinds;
   if (!freshKinds || !freshKinds.length) return staleKinds;
   const a = kindScore(staleKinds);
   const b = kindScore(freshKinds);
-  if (a.urls !== b.urls) return a.urls > b.urls ? staleKinds : freshKinds;
-  return a.total > b.total ? staleKinds : freshKinds;
+  // 只有「新的彻底没有内容入口、旧的还有」才算退化
+  if (b.content === 0 && a.content > 0) return staleKinds;
+  return freshKinds;
 }
 
 /**
@@ -183,7 +199,15 @@ function bestCachedKinds(key) {
   const good = readKindFile(key, true);
   if (!main) return good;
   if (!good) return main;
-  if (keepBetterKinds(good.kinds, main.kinds) === good.kinds) {
+  /**
+   * 主缓存比 .good 更完整时才回填。
+   * 注意判据同样不能用「url 数谁多」——换分组后主缓存内容更少是正常的，
+   * 用 url 数比会把 .good 里的旧分组内容回填回去，等于切换没生效。
+   * 只有主缓存**完全没有内容入口**、而 .good 还有时，才判定主缓存残缺。
+   */
+  const mainScore = kindScore(main.kinds);
+  const goodScore = kindScore(good.kinds);
+  if (mainScore.content === 0 && goodScore.content > 0) {
     if (good.ruleStr !== main.ruleStr) aCache.put(key, good.ruleStr);
     return good;
   }
@@ -244,19 +268,19 @@ export function exploreKinds(ctx, source) {
       const fScore = kindScore(kinds);
       const sScore = kindScore(staleKinds);
       /* 「明显退化」的判定。
-         历史 bug：这里只看 url 入口数，于是「源站半死不活时只返回十几个筛选框、
-         但恰好带 1 个 url」会被判为正常，直接覆盖掉 300+ 项的完整缓存，
-         并且把残缺版写进 .good，连兜底备份一起毁掉 —— 表现为
-         「点一次刷新，光遇发现页从 364 项变成 11 项，再刷就空」。
+         历史 bug 一：只看 url 入口数，于是「源站半死不活时只返回十几个筛选框、
+         但恰好带 1 个 url」会被判为正常，覆盖掉 300+ 项的完整缓存，
+         还把残缺版写进 .good —— 表现为「点一次刷新，光遇发现页从 364 项变成 11 项」。
 
-         现在改成两条都要看：
-           · 新结果为空 → 退化
-           · 新结果 url 入口变少 → 退化（榜单入口消失是质变）
-           · 新结果 url 数持平或更多，但总数明显缩水（< 旧的一半）→ 退化
-         只有真正「比旧的好」才覆盖缓存。 */
-      const degenerate = !kinds.length
-        || (sScore.urls > 0 && fScore.urls < sScore.urls)
-        || (sScore.total > 0 && fScore.total < Math.floor(sScore.total / 2));
+         历史 bug 二：改成「url 变少就算退化」之后，把**换分组**误判成退化。
+         七猫「📊 排行榜」只有 20 个榜单、「🏷️ 标签」只有 36 个标签，
+         而「🔄 动态分类」有 200+ 项；从后者切到前者时 url 必然变少，
+         于是新结果被旧的完整缓存挡掉 —— 表现是「切换分组没反应」。
+
+         正确判据：只有「新结果一个内容入口都没有、旧的却有」才是真故障
+         （源站 502 时脚本只剩筛选框）。内容比上次少是正常的筛选结果，必须放行。
+       */
+      const degenerate = !kinds.length || (fScore.content === 0 && sScore.content > 0);
       const kept = userRefresh && !degenerate ? kinds : keepBetterKinds(staleKinds, kinds);
       if (kept === staleKinds && staleRuleStr) {
         // 新结果是残缺的：把上次完整的那份写回主缓存，实现自愈。
@@ -268,10 +292,9 @@ export function exploreKinds(ctx, source) {
          历史 bug：这里无条件写入，于是残缺的刷新结果（如 11 项）
          会把上一份完整结果（如 364 项）覆盖掉，兜底备份直接失效，
          之后源站再怎么恢复也救不回来了。 */
-      const gScore = goodCached ? kindScore(goodCached.kinds) : { urls: 0, total: 0 };
-      const betterThanGood = !goodCached
-        || fScore.urls > gScore.urls
-        || (fScore.urls === gScore.urls && fScore.total >= gScore.total);
+      // .good 的作用只是「源站故障时的兜底」。换分组产生的内容更少但有效，
+      // 同样要更新它，否则下次切换还会被上一份大缓存挡住（见上面 bug 二）。
+      const betterThanGood = !goodCached || fScore.content > 0;
       if (betterThanGood) aCache.putGood(key, ruleStr);
       return remember(kinds);
     } catch (e) {

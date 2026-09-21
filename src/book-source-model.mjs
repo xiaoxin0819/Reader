@@ -77,6 +77,25 @@ export function normalizeSource(raw) {
     // 用于把该源排除在「书架全量后台预热」之外 —— 用户没有主动打开的书，
     // 不应该由后台批量请求，只保留「最近阅读」那本的少量预热。
     noShelfWarm: src.noShelfWarm === true,
+    /**
+     * 自定义扩展字段（legado 无此项）：「限制该书源（防封禁）」总开关。
+     *
+     * 一个开关同时管住三件事，避免用户在三个地方分别配置：
+     *   1) 禁止导出 TXT      —— 整本导出是连续几百次请求，实测会触发速读谷风控
+     *   2) 禁止后台批量预热  —— 启动 / 清缓存后的书架全量预热
+     *   3) 限制并发           —— 同一书源同时最多 3 个请求在飞
+     *
+     * 落库时**同时写三个旧字段**（noExport / noShelfWarm / concurrencyLimit），
+     * 这样：
+     *   · 旧版本读到的还是熟悉的 noExport / noShelfWarm，行为不变；
+     *   · 新版本只看本字段即可，取消勾选时三件事一起清掉。
+     */
+    limited: src.limited === true,
+    /**
+     * 自定义扩展字段：同一书源的最大并发请求数（0 / 缺省 = 不限制）。
+     * 由「限制该书源（防封禁）」自动设为 3，也可单独配置。
+     */
+    concurrencyLimit: Math.max(0, Math.trunc(Number(src.concurrencyLimit) || 0)),
   };
   return source;
 }
@@ -261,6 +280,9 @@ export function sourceSummary(s) {
     hasSearch,
     hasExplore,
     noExport: s.noExport === true,
+    // 「限制该书源（防封禁）」总开关与并发上限（UI 的复选框读写这两个）
+    limited: s.limited === true,
+    concurrencyLimit: Math.max(0, Math.trunc(Number(s.concurrencyLimit) || 0)),
     hasLogin: !!(s.loginUrl && String(s.loginUrl).trim()) || !!(s.loginUi && String(s.loginUi).replace(/\s/g, '') !== '[]'),
     jsSource: isJsSource(s),
     useWebView: /@webjs:|useWebView|"webView"\s*:\s*true|,?\s*"?webView"?\s*:\s*true/i.test(

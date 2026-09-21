@@ -1,5 +1,8 @@
 // js-runtime.mjs —— legado Rhino 脚本运行时的 node:vm 复刻
 import vm from 'node:vm';
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
 import * as cryptoUtils from './crypto-utils.mjs';
 import { formatKeepImg, format as htmlFormatAll } from './html-format.mjs';
 import { installJavaShims, SANDBOX_BOOTSTRAP } from './packages-shim.mjs';
@@ -8,6 +11,39 @@ import { DEFAULT_UA } from './http-core.mjs';
 import { getSubDomain } from './net-utils.mjs';
 
 const DEFAULT_UA_TEXT = DEFAULT_UA;
+
+/**
+ * 本机设备标识（等价 legado 的 Settings.Secure.ANDROID_ID：唯一 + 持久）。
+ *
+ * 为什么必须唯一：书源会把 deviceId 拼进请求 cookie 当设备指纹，
+ * 所有用户共用一个值会被上游风控判定为异常设备（详见 JavaBridgeBase.androidId 注释）。
+ * 为什么必须持久：同一台机器重启后 deviceId 变了，服务端会当成新设备重新风控。
+ */
+let cachedDeviceId = '';
+function resolveDeviceId() {
+  if (cachedDeviceId) return cachedDeviceId;
+
+  const fromEnv = String(process.env.READER_DEVICE_ID || '').trim();
+  if (fromEnv) return (cachedDeviceId = fromEnv);
+
+  // 落盘位置与其它运行时数据一致：优先 READER_CACHE_DIR，其次进程工作目录下的 cache。
+  const dir = process.env.READER_CACHE_DIR
+    ? path.resolve(process.env.READER_CACHE_DIR)
+    : path.join(process.cwd(), 'cache');
+  const file = path.join(dir, 'device-id');
+  try {
+    const old = fs.readFileSync(file, 'utf8').trim();
+    if (old) return (cachedDeviceId = old);
+  } catch { /* 首次运行或读失败，下面生成 */ }
+
+  // 16 位十六进制，与 Android ID 形态一致（legado 也按 16 字符用）
+  const fresh = crypto.randomBytes(8).toString('hex');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, fresh, 'utf8');
+  } catch { /* 只读环境：退化为进程内随机，至少不与其它用户相同 */ }
+  return (cachedDeviceId = fresh);
+}
 
 /** Rhino 语义：Java String 参数收到 null 就是 null（不是 "null"）；这里统一收敛 */
 function str4(v) {
@@ -501,7 +537,26 @@ export class JavaBridgeBase {
   get7zStringContent() { throw new WebJsUnsupportedError('java.get7zStringContent'); }
   singleFlight() { throw new WebJsUnsupportedError('java.singleFlight'); }
   lock() { throw new WebJsUnsupportedError('java.lock'); }
-  androidId() { return 'localreader00000'; } // 16 字符：legado 用 encodeToByteArray(0,16) 作 AES key
+  /**
+   * legado：Settings.Secure.ANDROID_ID —— 每台设备唯一且稳定的 16 位十六进制串。
+   *
+   * 桌面端原来返回固定常量 'localreader00000'，等于所有用户共用同一个设备指纹。
+   * 光遇聚合的 request() 会把它拼进 cookie（`qttoken=...;deviceId=${device}`）：
+   *   · 服务端把「同一 deviceId 反复登录」判为异常 → 返回「多次登录失败，请2小时后重试」；
+   *   · 更严重的是这个固定串已经被上游风控拉黑，带它请求直接吃 Cloudflare 502，
+   *     表现为「填了账号密码点登录没反应」。
+   * 所以必须像 legado 一样给出「本机唯一且持久」的值。
+   *
+   * 取值优先级：
+   *   1) 环境变量 READER_DEVICE_ID（部署方可显式指定）
+   *   2) <cache>/device-id（首次运行生成后落盘，重启/升级都不变）
+   *   3) 兜底：进程内随机生成（只读文件系统等极端情况）
+   */
+  androidId() {
+    if (this._androidId) return this._androidId;
+    this._androidId = resolveDeviceId();
+    return this._androidId;
+  }
   t2s(text) { return String(text == null ? '' : text); }
   s2t(text) { return String(text == null ? '' : text); }
 }
