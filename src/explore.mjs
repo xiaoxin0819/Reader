@@ -243,7 +243,20 @@ export function exploreKinds(ctx, source) {
       // 一个 url 入口都没有）时退回 .good，避免「点一次刷新，榜单全没了」。
       const fScore = kindScore(kinds);
       const sScore = kindScore(staleKinds);
-      const degenerate = !kinds.length || (fScore.urls === 0 && sScore.urls > 0);
+      /* 「明显退化」的判定。
+         历史 bug：这里只看 url 入口数，于是「源站半死不活时只返回十几个筛选框、
+         但恰好带 1 个 url」会被判为正常，直接覆盖掉 300+ 项的完整缓存，
+         并且把残缺版写进 .good，连兜底备份一起毁掉 —— 表现为
+         「点一次刷新，光遇发现页从 364 项变成 11 项，再刷就空」。
+
+         现在改成两条都要看：
+           · 新结果为空 → 退化
+           · 新结果 url 入口变少 → 退化（榜单入口消失是质变）
+           · 新结果 url 数持平或更多，但总数明显缩水（< 旧的一半）→ 退化
+         只有真正「比旧的好」才覆盖缓存。 */
+      const degenerate = !kinds.length
+        || (sScore.urls > 0 && fScore.urls < sScore.urls)
+        || (sScore.total > 0 && fScore.total < Math.floor(sScore.total / 2));
       const kept = userRefresh && !degenerate ? kinds : keepBetterKinds(staleKinds, kinds);
       if (kept === staleKinds && staleRuleStr) {
         // 新结果是残缺的：把上次完整的那份写回主缓存，实现自愈。
@@ -251,7 +264,15 @@ export function exploreKinds(ctx, source) {
         return remember(staleKinds);
       }
       aCache.put(key, ruleStr);
-      aCache.putGood(key, ruleStr);
+      /* .good 只允许被「更好的结果」升级。
+         历史 bug：这里无条件写入，于是残缺的刷新结果（如 11 项）
+         会把上一份完整结果（如 364 项）覆盖掉，兜底备份直接失效，
+         之后源站再怎么恢复也救不回来了。 */
+      const gScore = goodCached ? kindScore(goodCached.kinds) : { urls: 0, total: 0 };
+      const betterThanGood = !goodCached
+        || fScore.urls > gScore.urls
+        || (fScore.urls === gScore.urls && fScore.total >= gScore.total);
+      if (betterThanGood) aCache.putGood(key, ruleStr);
       return remember(kinds);
     } catch (e) {
       if (staleKinds && staleKinds.length) {
